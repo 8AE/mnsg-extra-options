@@ -1,89 +1,46 @@
-# Config file for an example Majora's Mask: Recompiled mod.
-
-# Fields that end up in the mod's manifest.
 [manifest]
 
-# Unique ID of this mod. Pick something long enough that it'll never be the same as any other mod.
-# The name displayed in the mod management menu is separate from this so this doesn't need to be human readable.
-id = "mnsg_recomp_mod_template"
-
-# Version of this mod.
+id = "mnsg_extra_options"
 version = "1.0.0"
-
-# The name that will show up for this mod in the mod menu. This should be human readable.
-display_name = "Test Mod"
-
-# The description that will show up when this mod is displayed in the mod menu. This should be human readable.
-description =  """
-This is an example mod for Mystical Ninja Starring Goemon: Recompiled that can be used as a template for creating mods. \
-When this mod is enabled, a string of text will appear in the top left corner of the screen.
-
-For more details, see https://github.com/klorfmorf/MNSGRecompModTemplate."""
-
-# A short description that will show up in this mod's entry in the mod list. This should be human readable and kept short
-# to prevent it from being cut off due to the limited space.
-short_description = "Display a string of text in the top left corner of the screen."
-
-# Authors of this mod.
-authors = [ "Your name here" ]
-
-# ID of the target recomp game.
+display_name = "Extra Options"
+description = """
+Adds optional gameplay challenges to Mystical Ninja Starring Goemon: Recompiled. \
+Configure No Hit, 1 Life, and the experimental Enemy Multiplier from the mod menu."""
+short_description = "Optional No Hit, 1 Life, and enemy multiplier challenges."
+authors = ["Killzbro"]
 game_id = "mnsg"
-
-# Minimum version of the target recomp (e.g. Zelda 64: Recompiled) that this mod can run on.
 minimum_recomp_version = "0.1.0"
+dependencies = []
+native_libraries = []
 
-# Dependency mods. Each entry is the mod's ID and then an optional minimum version of the dependency mod.
-dependencies = [
-# Example dependency:
-#    "modname:1.0.0"
-]
+[[manifest.config_options]]
+id = "no_hit"
+name = "No Hit"
+description = "Any damage immediately drops the active player's health to zero."
+type = "Enum"
+options = ["Enabled", "Disabled"]
+default = "Disabled"
 
-# Native libraries (e.g. DLLs) and the functions they export.
-native_libraries = [
-# Example native library:
-#    { name = "my_native_library", funcs = ["my_native_library_function"] }
-]
+[[manifest.config_options]]
+id = "one_life"
+name = "1 Life"
+description = "Keep the player at one internal life so the next death is game over."
+type = "Enum"
+options = ["Enabled", "Disabled"]
+default = "Disabled"
 
-# Inputs to the mod tool.
+[[manifest.config_options]]
+id = "enemy_multiplier"
+name = "Enemy Multiplier"
+description = "Experimental. Choose how many copies of each supported enemy spawn when a room loads; higher values may crash the game."
+type = "Enum"
+options = ["1x (Normal)", "2x", "3x"]
+default = "1x (Normal)"
+
 [inputs]
 
-# Input elf file to generate a mod from.
 elf_path = "build/mod.elf"
-
-# Output mod filename.
-mod_filename = "mnsg_recomp_mod_template"
-
-# Reference symbol files.
+mod_filename = "mnsg_extra_options"
 func_reference_syms_file = "Goemon64RecompSyms/mnsg.us.syms.toml"
-data_reference_syms_files = [ "Goemon64RecompSyms/mnsg.us.datasyms.toml" ]
-
-# Additional files to include in the mod.
-additional_files = [ ]
-
-[[manifest.config_options]]
-id = "enum_option"
-name = "Enum Option"
-description = "Test enum config option"
-type = "Enum"
-options = [ "First", "Second" ]
-default = "First"
-
-[[manifest.config_options]]
-id = "number_option"
-name = "Number Option"
-description = "Test number config option."
-type = "Number"
-min = 0
-max = 10
-step = 0.1
-precision = 1
-percent = false
-default = 1
-
-[[manifest.config_options]]
-id = "string_option"
-name = "String Option"
-description = "Test string config option."
-type = "String"
-default = "Lorem Ipsum"
+data_reference_syms_files = ["Goemon64RecompSyms/mnsg.us.datasyms.toml"]
+additional_files = []

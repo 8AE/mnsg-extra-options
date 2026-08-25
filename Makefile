@@ -1,16 +1,13 @@
 BUILD_DIR := build
 
-# Allow the user to specify the compiler and linker on macOS
-# as Apple Clang does not support MIPS architecture
-ifeq ($(OS),Windows_NT)
-    CC      := clang
-    LD      := ld.lld
-else ifneq ($(shell uname),Darwin)
-    CC      := clang
-    LD      := ld.lld
-else
-    CC      ?= clang
-    LD      ?= ld.lld
+# Respect explicit toolchain selections while avoiding GNU Make's built-in
+# `cc`/`ld` defaults. Apple Clang cannot target MIPS, so macOS users should
+# invoke build_mod.sh, which locates Homebrew LLVM/LLD and passes them here.
+ifeq ($(origin CC),default)
+    CC := clang
+endif
+ifeq ($(origin LD),default)
+    LD := ld.lld
 endif
 
 TARGET  := $(BUILD_DIR)/mod.elf
@@ -25,11 +22,11 @@ CPPFLAGS := -nostdinc -D_LANGUAGE_C -DMIPS -DF3DEX_GBI -I include -I include/dum
 			-I mnsg/include -I mnsg/libultra/include -I mnsg/src
 LDFLAGS  := -nostdlib -T $(LDSCRIPT) -Map $(BUILD_DIR)/mod.map --unresolved-symbols=ignore-all --emit-relocs -e 0 --no-nmagic
 
-C_SRCS := $(wildcard src/*.c)
+C_SRCS := $(shell find src -name '*.c' | sort)
 C_OBJS := $(addprefix $(BUILD_DIR)/, $(C_SRCS:.c=.o))
 C_DEPS := $(addprefix $(BUILD_DIR)/, $(C_SRCS:.c=.d))
 
-S_SRCS := $(wildcard src/*.s)
+S_SRCS := $(shell find src -name '*.s' | sort)
 S_OBJS := $(addprefix $(BUILD_DIR)/, $(S_SRCS:.s=.o))
 
 all: $(TARGET)
@@ -37,25 +34,19 @@ all: $(TARGET)
 $(TARGET): $(C_OBJS) $(S_OBJS) $(LDSCRIPT) | $(BUILD_DIR)
 	$(LD) $(C_OBJS) $(S_OBJS) $(LDFLAGS) -o $@
 
-$(BUILD_DIR) $(BUILD_DIR)/src:
-ifeq ($(OS),Windows_NT)
-	mkdir $(subst /,\,$@)
-else
+$(BUILD_DIR):
 	mkdir -p $@
-endif
 
-$(C_OBJS): $(BUILD_DIR)/%.o : %.c | $(BUILD_DIR) $(BUILD_DIR)/src
+$(C_OBJS): $(BUILD_DIR)/%.o : %.c | $(BUILD_DIR)
+	mkdir -p $(@D)
 	$(CC) $(CFLAGS) $(CPPFLAGS) $< -MMD -MF $(@:.o=.d) -c -o $@
 
-$(S_OBJS): $(BUILD_DIR)/%.o : %.s | $(BUILD_DIR) $(BUILD_DIR)/src
-	$(CC) $(ASFLAGS) -I src -nostdinc -D_LANGUAGE_C -DMIPS -DF3DEX_GBI -I include -I include/dummy_headers -I mnsg/include -I mnsg/include/libultra -I mnsg/src $< -c -o $@
+$(S_OBJS): $(BUILD_DIR)/%.o : %.s | $(BUILD_DIR)
+	mkdir -p $(@D)
+	$(CC) $(ASFLAGS) -I src -nostdinc -D_LANGUAGE_C -DMIPS -DF3DEX_GBI -I include -I include/dummy_headers -I mnsg/include -I mnsg/libultra/include -I mnsg/src $< -c -o $@
 
 clean:
-ifeq ($(OS),Windows_NT)
-	rmdir /S /Q $(BUILD_DIR)
-else
 	rm -rf $(BUILD_DIR)
-endif
 
 -include $(C_DEPS)
 
