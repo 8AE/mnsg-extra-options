@@ -5,8 +5,8 @@ version = "1.0.0"
 display_name = "Extra Options"
 description = """
 Adds optional gameplay challenges to Mystical Ninja Starring Goemon: Recompiled. \
-Configure No Hit, 1 Life, Loose Ryo on hit, and the experimental Enemy Multiplier from the mod menu."""
-short_description = "Optional No Hit, 1 Life, Ryo loss, and enemy multiplier challenges."
+Configure No Hit, 1 Life, Loose Ryo on hit, Hyper Enemies, and the experimental Enemy Multiplier from the mod menu."""
+short_description = "Optional No Hit, 1 Life, Ryo loss, Hyper Enemies, and enemy multiplier challenges."
 authors = ["Killzbro"]
 game_id = "mnsg"
 minimum_recomp_version = "0.1.0"
@@ -33,6 +33,14 @@ default = "Disabled"
 id = "loose_ryo_on_hit"
 name = "Loose Ryo on hit"
 description = "Lose 50 Ryo and show the game's floating -50 Ryo robbery effect whenever the player takes damage."
+type = "Enum"
+options = ["Enabled", "Disabled"]
+default = "Disabled"
+
+[[manifest.config_options]]
+id = "hyper_enemies"
+name = "Hyper Enemies"
+description = "Give supported enemies and bosses three additional native combat ticks, quadrupling movement and firing rate along with their normal physics and collision processing."
 type = "Enum"
 options = ["Enabled", "Disabled"]
 default = "Disabled"
