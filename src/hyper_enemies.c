@@ -6,9 +6,9 @@
  * Ghidra shows that the native task scheduler runs callbacks at task +0x08,
  * +0x0C, and +0x10.  Actors use +0x0C for their overlay AI and +0x10 for
  * func_80218F30, the common movement/collision/finalization pass.  Replaying
- * only those latter two callbacks gives selected combat actors additional AI
- * and movement ticks without duplicating the global scheduler or its culling
- * and animation bookkeeping.
+ * only those latter two callbacks gives selected combat actors and obstacle
+ * tasks additional AI and movement ticks without duplicating the global
+ * scheduler or its culling and animation bookkeeping.
  */
 
 #define HYPER_SEEN_CAPACITY 256
@@ -30,6 +30,16 @@
     (*(volatile unsigned char *)((char *)(task) + 0x74))
 #define TASK_HEALTH(task) \
     (*(volatile unsigned char *)((char *)(task) + 0x8D))
+#define TASK_ROTATION_STEP(task) \
+    (*(volatile unsigned int *)((char *)(task) + 0xD0))
+#define TASK_WRITE16(task, offset, value) \
+    (*(volatile unsigned short *)((char *)(task) + (offset)) = \
+         (unsigned short)(value))
+#define TASK_WRITE32(task, offset, value) \
+    (*(volatile unsigned int *)((char *)(task) + (offset)) = \
+         (unsigned int)(unsigned long)(value))
+#define OBJECT_YAW(object) \
+    (*(volatile unsigned short *)((char *)(object) + 0x16))
 #define DARUMANYO_LIVES(task) \
     (*(volatile unsigned char *)((char *)(task) + 0xD1))
 #define BENKEI_STATE(task) \
@@ -49,10 +59,25 @@
 #define TASK_STATUS_REMOVE_PENDING 0x00000002u
 #define TASK_CALLBACK_DISABLED_BIT 0x00800000u
 
+#define ACTOR_DANGO_MACHINE 0x0149u
+#define ACTOR_SPIKE_CHAIN 0x0198u
+
+#define ENTITY_DANGO_WIPER 0x0134u
+#define ENTITY_SPIKE_CHAIN 0x0198u
 #define ENTITY_DARUMANYO 0x00CCu
 #define ENTITY_MIND_CONTROL_ROBOT 0x01B0u
 #define ENTITY_BENKEI 0x01C0u
 #define ENTITY_CONGO 0x0323u
+
+#define DANGO_RESOURCE_FILE_ID 0x0018u
+#define DANGO_CHILD_TASK_KIND 6u
+#define DANGO_NORMAL_SPAWN_MASK 0x003Fu
+#define DANGO_HYPER_SPAWN_MASK 0x000Fu
+
+#define DANGO_MACHINE_FRAME_COUNTER \
+    (*(volatile unsigned short *)0x8015CC30)
+#define DANGO_ACTIVE_CHILD_COUNT \
+    (*(volatile unsigned short *)0x8015CDB4)
 
 #define ROOM_CONGO 0x016u
 #define ROOM_DARUMANYO 0x049u
@@ -84,6 +109,11 @@ extern void *D_8016DAB4_16E6B4;
 extern unsigned short D_800C7AB2;
 extern void *D_8020EED0_63A2B0;
 extern int func_800240DC_24CDC(int flag_id);
+extern void *func_800141C4_14DC4(unsigned int file_id);
+extern void *func_802171A8_5D2678(
+    void *owner, ExtraOptionsTaskCallback initializer,
+    unsigned char task_kind);
+extern void func_08000224_6AC774(void *task, void *object);
 
 static HyperActorIdentity s_seen_actors[HYPER_SEEN_CAPACITY];
 static HyperActorIdentity s_captured_actor;
@@ -108,6 +138,52 @@ static int hyper_enemies_is_enabled(void)
     return recomp_get_config_u32("hyper_enemies") == 0;
 }
 
+/* Actor 0x149 is a Dango machine controller.  Its native callback emits one
+ * moving wiper every 64 frames, while the emitted child inherits actor 0x149
+ * and changes its entity ID to 0x134.  Replaying the controller three times
+ * on one scheduler frame would stack four identical children, so patch its
+ * cadence to one child every 16 frames and let only the children receive the
+ * normal Hyper callback replays. */
+RECOMP_PATCH void func_080001A4_6AC6F4(void *task, void *object)
+{
+    unsigned short spawn_mask = DANGO_NORMAL_SPAWN_MASK;
+    void *child;
+
+    if (hyper_enemies_is_enabled() && extra_options_save_is_loaded())
+        spawn_mask = DANGO_HYPER_SPAWN_MASK;
+
+    if ((DANGO_MACHINE_FRAME_COUNTER & spawn_mask) != 0)
+        return;
+
+    child = func_802171A8_5D2678(
+        task, func_08000224_6AC774, DANGO_CHILD_TASK_KIND);
+    if (!child)
+        return;
+
+    TASK_WRITE16(child, 0x28, DANGO_RESOURCE_FILE_ID);
+    TASK_WRITE32(child, 0x2C,
+                 func_800141C4_14DC4(DANGO_RESOURCE_FILE_ID));
+    DANGO_ACTIVE_CHILD_COUNT++;
+}
+
+/* Actor 0x198's active callback only adds task +0xD0 to the model yaw at
+ * object +0x16.  Scale that native angle step directly so the following
+ * common collision/finalization pass runs once at the final 4x rotation. */
+RECOMP_PATCH void func_080005DC_6ACB2C(void *task, void *object)
+{
+    unsigned int multiplier = 1;
+
+    if (hyper_enemies_is_enabled() && extra_options_save_is_loaded() &&
+        TASK_ACTOR_ID(task) == ACTOR_SPIKE_CHAIN &&
+        TASK_ENTITY_ID(task) == ENTITY_SPIKE_CHAIN)
+    {
+        multiplier = HYPER_EXTRA_TICKS + 1;
+    }
+
+    OBJECT_YAW(object) = (unsigned short)(
+        OBJECT_YAW(object) + TASK_ROTATION_STEP(task) * multiplier);
+}
+
 static int is_regular_enemy(unsigned short actor_id)
 {
     /* Curated from multiplayer's live-enemy roster.  Top-level hazards,
@@ -123,6 +199,12 @@ static int is_regular_enemy(unsigned short actor_id)
            (actor_id >= 0x144u && actor_id <= 0x145u) ||
            (actor_id >= 0x147u && actor_id <= 0x148u) ||
            actor_id == 0x190u || actor_id == 0x1A6u;
+}
+
+static int is_dango_wiper_child(void *task)
+{
+    return TASK_ACTOR_ID(task) == ACTOR_DANGO_MACHINE &&
+           TASK_ENTITY_ID(task) == ENTITY_DANGO_WIPER;
 }
 
 static void clear_runtime_tracking(void)
@@ -251,7 +333,7 @@ static int is_live_hyper_target(void *task)
     if (!task || (TASK_STATUS(task) & TASK_STATUS_REMOVE_PENDING) != 0)
         return 0;
 
-    if (is_regular_enemy(TASK_ACTOR_ID(task)))
+    if (is_regular_enemy(TASK_ACTOR_ID(task)) || is_dango_wiper_child(task))
         return TASK_HEALTH(task) > 0;
 
     room = D_800C7AB2;

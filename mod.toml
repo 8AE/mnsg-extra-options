@@ -40,7 +40,7 @@ default = "Disabled"
 [[manifest.config_options]]
 id = "hyper_enemies"
 name = "Hyper Enemies"
-description = "Give supported enemies and bosses three additional native combat ticks, quadrupling movement and firing rate along with their normal physics and collision processing."
+description = "Give supported enemies, enemy obstacles, and bosses 4x movement and attack cadence while retaining their native physics and collision processing."
 type = "Enum"
 options = ["Enabled", "Disabled"]
 default = "Disabled"

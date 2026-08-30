@@ -9,7 +9,7 @@ Extra Options is a standalone mod for Mystical Ninja Starring Goemon: Recompiled
 | No Hit | Disabled | Any nonlethal damage immediately reduces the active character's HP to zero. |
 | 1 Life | Disabled | Keeps both the runtime and saved life count at one while the player is alive. |
 | Loose Ryo on hit | Disabled | Each damaging hit removes 50 Ryo and plays the native floating `-50 Ryo` robbery effect. |
-| Hyper Enemies | Disabled | Gives supported enemies and boss controllers three additional native combat ticks, quadrupling movement and firing cadence along with their normal physics and collision processing. |
+| Hyper Enemies | Disabled | Gives supported enemies, enemy obstacles, and boss controllers 4x movement and attack cadence while retaining their native physics and collision processing. |
 | Enemy Multiplier | 1x (Normal) | Spawns two or three copies of supported enemy actors. This option is experimental and may crash the game. |
 
 Multiplayer-only damage and Ryo synchronization are not included because they are network packet features rather than standalone gameplay rules.
