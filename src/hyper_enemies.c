@@ -41,8 +41,6 @@
          (unsigned int)(unsigned long)(value))
 #define OBJECT_YAW(object) \
     (*(volatile unsigned short *)((char *)(object) + 0x16))
-#define DARUMANYO_LIVES(task) \
-    (*(volatile unsigned char *)((char *)(task) + 0xD1))
 #define BENKEI_STATE(task) \
     (*(volatile unsigned char *)((char *)(task) + 0xD0))
 #define BENKEI_LIVES(task) \
@@ -65,7 +63,6 @@
 
 #define ENTITY_DANGO_WIPER 0x0134u
 #define ENTITY_SPIKE_CHAIN 0x0198u
-#define ENTITY_DARUMANYO 0x00CCu
 #define ENTITY_MIND_CONTROL_ROBOT 0x01B0u
 #define ENTITY_BENKEI 0x01C0u
 
@@ -79,7 +76,6 @@
 #define DANGO_ACTIVE_CHILD_COUNT \
     (*(volatile unsigned short *)0x8015CDB4)
 
-#define ROOM_DARUMANYO 0x049u
 #define ROOM_TSURAMI 0x071u
 #define ROOM_DRAGON_FIGHT 0x155u
 #define ROOM_BENKEI 0x171u
@@ -125,7 +121,6 @@ static unsigned char s_mind_control_combat_active;
 static ExtraOptionsTaskCallback s_captured_post_callback;
 
 static HyperActorIdentity s_tsurami_actor;
-static HyperActorIdentity s_darumanyo_actor;
 static HyperActorIdentity s_mind_control_robot;
 static HyperActorIdentity s_benkei_actor;
 static HyperSpecialBossIdentity s_thaisamba_special_boss;
@@ -191,6 +186,7 @@ static int is_regular_enemy(unsigned short actor_id)
     return (actor_id >= 0x0FAu && actor_id <= 0x100u) ||
            (actor_id >= 0x102u && actor_id <= 0x10Cu) ||
            (actor_id >= 0x10Fu && actor_id <= 0x110u) ||
+           /* 0x132 here is the ordinary Bouncing Darumanyo enemy. */
            (actor_id >= 0x12Cu && actor_id <= 0x133u) ||
            actor_id == 0x136u ||
            (actor_id >= 0x13Au && actor_id <= 0x141u) ||
@@ -217,7 +213,6 @@ static void clear_runtime_tracking(void)
     s_mind_control_combat_active = 0;
     s_captured_post_callback = 0;
     s_tsurami_actor.task = 0;
-    s_darumanyo_actor.task = 0;
     s_mind_control_robot.task = 0;
     s_benkei_actor.task = 0;
     s_thaisamba_special_boss.state = 0;
@@ -336,17 +331,13 @@ static int is_live_hyper_target(void *task)
     if (extra_options_hyper_congo_child_is_live(task))
         return 1;
 
+    if (extra_options_hyper_dharumanyo_projectile_is_live(task))
+        return 1;
+
     room = D_800C7AB2;
     /* Tsurami enters its native death sequence at one HP. */
     if (tracked_actor_matches(&s_tsurami_actor, task) && room == ROOM_TSURAMI)
         return TASK_HEALTH(task) > 1;
-
-    if (tracked_actor_matches(&s_darumanyo_actor, task) &&
-        room == ROOM_DARUMANYO &&
-        TASK_ENTITY_ID(task) == ENTITY_DARUMANYO)
-    {
-        return DARUMANYO_LIVES(task) > 0;
-    }
 
     if (tracked_actor_matches(&s_mind_control_robot, task) &&
         room == ROOM_DRAGON_FIGHT &&
@@ -395,19 +386,6 @@ RECOMP_HOOK("func_08000388_6B3628")
 void extra_options_track_hyper_tsurami(void *actor)
 {
     track_boss_actor(&s_tsurami_actor, actor);
-}
-
-RECOMP_HOOK("func_08003E64_6CC074")
-void extra_options_capture_hyper_darumanyo(void *actor)
-{
-    track_boss_actor(&s_darumanyo_actor, actor);
-}
-
-RECOMP_HOOK("func_08003F84_6CC194")
-void extra_options_track_hyper_darumanyo(void *actor)
-{
-    if (actor && TASK_ENTITY_ID(actor) == ENTITY_DARUMANYO)
-        track_boss_actor(&s_darumanyo_actor, actor);
 }
 
 RECOMP_HOOK("func_08000B98_70ABD8")

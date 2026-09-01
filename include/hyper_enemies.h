@@ -18,4 +18,9 @@ unsigned int extra_options_hyper_run_captured_tick(
 /* Congo-owned flames use the common post callback, unlike their boss. */
 int extra_options_hyper_congo_child_is_live(void *task);
 
+/* Dharumanyo's travelling attack carrier also uses the common post callback.
+ * Its dedicated implementation admits only children from the exact native
+ * projectile constructor, leaving trails and impact effects at native speed. */
+int extra_options_hyper_dharumanyo_projectile_is_live(void *task);
+
 #endif
