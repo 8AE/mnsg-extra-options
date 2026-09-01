@@ -1,8 +1,8 @@
 /*
- * Host regression tests for the production Congo identity, flame admission,
- * emitter, model-part ordering, and diagnostic code.  Shared scheduler replay
- * is mocked, and callback-slot access/enabling uses a host ABI fixture.  These
- * tests do not certify the native scheduler or in-game AI.
+ * Host regression tests for the production Congo identity, spin state machine,
+ * flame admission, emitter, model-part ordering, and diagnostic code.  Shared
+ * scheduler replay is mocked, and callback-slot access/enabling uses a host ABI
+ * fixture.  These tests do not certify the native scheduler or in-game AI.
  *
  * Run from the repository root:
  *   xcrun clang -std=c11 -Wall -Wextra -Werror -I include \
@@ -81,6 +81,14 @@ typedef struct
     void *child;
 } MockSpawn;
 
+typedef struct
+{
+    void *task;
+    unsigned int animation;
+    float rate;
+    unsigned int flags;
+} MockAnimationRestart;
+
 unsigned short D_800C7AB2;
 unsigned char *D_8015C5C8_15D1C8;
 void *D_8016DAB4_16E6B4;
@@ -101,6 +109,12 @@ static unsigned int s_part_ai_calls[CONGO_PART_COUNT + 1];
 static unsigned int s_part_post_calls[CONGO_PART_COUNT + 1];
 static unsigned int s_part_signals[CONGO_PART_COUNT + 1][4];
 static unsigned int s_part_behavior[CONGO_PART_COUNT + 1];
+static HyperCongoTaskCallback s_spin_callback;
+static unsigned int s_spin_callback_installs;
+static MockAnimationRestart s_animation_restarts[MOCK_CAPACITY];
+static unsigned int s_animation_restart_calls;
+static int s_damage_event_active;
+static unsigned int s_damage_event_clear_calls;
 static int s_mock_run_before_ticks;
 static MockSpawn s_spawns[MOCK_CAPACITY];
 static unsigned int s_spawn_calls;
@@ -144,6 +158,8 @@ static unsigned int model_index(void *task)
 
 static TestTaskCallback test_task_ai(void *task)
 {
+    if (task == s_root.bytes)
+        return s_spin_callback;
     return s_part_ai[model_index(task)];
 }
 
@@ -232,6 +248,12 @@ static void reset_fixture(void)
     memset(s_part_post_calls, 0, sizeof(s_part_post_calls));
     memset(s_part_signals, 0, sizeof(s_part_signals));
     memset(s_part_behavior, 0, sizeof(s_part_behavior));
+    memset(s_animation_restarts, 0, sizeof(s_animation_restarts));
+    s_spin_callback = 0;
+    s_spin_callback_installs = 0;
+    s_animation_restart_calls = 0;
+    s_damage_event_active = 0;
+    s_damage_event_clear_calls = 0;
     s_mock_run_before_ticks = 0;
     D_8015C5C8_15D1C8 = s_world;
     D_800C7AB2 = 0x016;
@@ -313,6 +335,53 @@ unsigned int extra_options_hyper_run_captured_tick(
                 before_tick(s_capture_task);
     }
     return s_completed_replays;
+}
+
+void func_08007C18_6BAEB8(void *task, void *object)
+{
+    (void)task;
+    (void)object;
+}
+
+/* Model the two native effects relevant to the return hook: 7BB0 advances
+ * ten-bit yaw by four and installs 7C18 with a 60-tick timer at 0x360. */
+void func_08007BB0_6BAE50(void *task, void *object)
+{
+    CHECK(D_8016DAB4_16E6B4 == task);
+    CHECK(object == get_pointer(task, 0x18));
+    OBJECT_YAW(object) = (unsigned short)((OBJECT_YAW(object) + 4u) & 0x3FFu);
+    if (OBJECT_YAW(object) == CONGO_SPIN_END_YAW)
+    {
+        TASK_SPIN_TIMER(task) = 60;
+        s_spin_callback = func_08007C18_6BAEB8;
+    }
+    extra_options_continue_hyper_congo_spin();
+}
+
+void func_80023E40_24A40(unsigned int event)
+{
+    CHECK(event == CONGO_DAMAGE_EVENT);
+    s_damage_event_active = 0;
+    s_damage_event_clear_calls++;
+}
+
+void func_8003521C_35E1C(HyperCongoTaskCallback callback)
+{
+    CHECK(D_8016DAB4_16E6B4 != 0);
+    s_spin_callback = callback;
+    s_spin_callback_installs++;
+}
+
+void func_8021664C_5D1B1C(
+    void *task, unsigned int animation, float rate, unsigned int flags)
+{
+    unsigned int call = s_animation_restart_calls++;
+
+    CHECK(call < MOCK_CAPACITY);
+    s_animation_restarts[call].task = task;
+    s_animation_restarts[call].animation = animation;
+    s_animation_restarts[call].rate = rate;
+    s_animation_restarts[call].flags = flags;
 }
 
 void *func_8021DDE8_5D92B8(
@@ -429,6 +498,39 @@ static void invoke_part_constructor_return(unsigned int part)
     D_8016DAB4_16E6B4 = s_model_parts[part].bytes;
     hooks[part]();
     D_8016DAB4_16E6B4 = s_root.bytes;
+}
+
+static void begin_spin_fixture(int track_parts)
+{
+    unsigned int part;
+
+    s_config = 0;
+    bind_root();
+    if (track_parts)
+    {
+        for (part = 0; part < CONGO_PART_COUNT; part++)
+        {
+            initialize_part(part, s_root.bytes);
+            invoke_part_constructor_return(part);
+        }
+    }
+    D_8016DAB4_16E6B4 = s_root.bytes;
+    extra_options_capture_hyper_congo_spin_trigger(s_root.bytes);
+    TASK_SPIN_TIMER(s_root.bytes) = 0;
+    extra_options_prepare_hyper_congo_spin(s_root.bytes);
+    OBJECT_YAW(s_object.bytes) = CONGO_SPIN_END_YAW;
+    s_spin_callback = func_08007BB0_6BAE50;
+}
+
+static void run_active_spin_ticks(unsigned int ticks)
+{
+    unsigned int tick;
+
+    for (tick = 0; tick < ticks; tick++)
+    {
+        CHECK(s_spin_callback == func_08007BB0_6BAE50);
+        s_spin_callback(s_root.bytes, s_object.bytes);
+    }
 }
 
 static void test_part_tracking_and_callback_guards(void)
@@ -559,6 +661,307 @@ static void test_part_delegation_obeys_mocked_shared_enable_contract(void)
     extra_options_run_hyper_congo_tick();
     CHECK(s_part_ai_calls[0] == 3 && s_part_post_calls[0] == 3);
     CHECK(s_before_tick == advance_congo_parts);
+}
+
+static void test_hyper_spin_runs_four_continuous_revolutions(void)
+{
+    unsigned int restart;
+    unsigned int part;
+
+    begin_spin_fixture(1);
+    for (restart = 0; restart < CONGO_HYPER_SPIN_ROTATIONS; restart++)
+    {
+        run_active_spin_ticks(256);
+        CHECK(OBJECT_YAW(s_object.bytes) == CONGO_SPIN_END_YAW);
+        if (restart + 1 < CONGO_HYPER_SPIN_ROTATIONS)
+        {
+            CHECK(s_spin_callback == func_08007BB0_6BAE50);
+            CHECK(TASK_SPIN_TIMER(s_root.bytes) == 0);
+            CHECK(s_spin_rotations == restart + 1);
+            CHECK(s_spin_callback_installs == restart + 1);
+            CHECK(s_animation_restart_calls ==
+                  (restart + 1) * CONGO_PART_COUNT);
+        }
+    }
+
+    /* Exactly 1,024 simulated AI ticks produce four full turns.  Only the
+     * fourth endpoint keeps native 7C18 and its 60-tick wind-down. */
+    CHECK(s_spin_callback == func_08007C18_6BAEB8);
+    CHECK(TASK_SPIN_TIMER(s_root.bytes) == 60);
+    CHECK(s_spin_rotations == 0);
+    CHECK(!s_spin_active);
+    CHECK(s_spin_trigger_consumed);
+    CHECK(s_spin_trigger_health == TASK_HEALTH(s_root.bytes));
+    CHECK(s_spin_callback_installs == 3);
+    CHECK(s_animation_restart_calls == 3 * CONGO_PART_COUNT);
+    for (restart = 0; restart < 3; restart++)
+    {
+        for (part = 0; part < CONGO_PART_COUNT; part++)
+        {
+            const MockAnimationRestart *call =
+                &s_animation_restarts[restart * CONGO_PART_COUNT + part];
+
+            CHECK(call->task == s_model_parts[part].bytes);
+            CHECK(call->animation == CONGO_SPIN_ANIMATION_BASE + part);
+            CHECK(call->rate == 0.05f);
+            CHECK(call->flags == 0);
+        }
+    }
+}
+
+static void test_completed_spin_latch_blocks_late_return(void)
+{
+    unsigned int revolution;
+    unsigned int installs;
+    unsigned int restarts;
+
+    begin_spin_fixture(1);
+    for (revolution = 0;
+         revolution < CONGO_HYPER_SPIN_ROTATIONS;
+         revolution++)
+    {
+        run_active_spin_ticks(256);
+    }
+
+    CHECK(!s_spin_active);
+    CHECK(s_spin_trigger_consumed);
+    CHECK(s_spin_callback == func_08007C18_6BAEB8);
+    CHECK(TASK_SPIN_TIMER(s_root.bytes) == 60);
+    installs = s_spin_callback_installs;
+    restarts = s_animation_restart_calls;
+
+    /* A delayed 7BB0 return after the fourth endpoint still sees yaw 0x360
+     * and native 7C18.  The explicit attack latch must keep it terminal. */
+    extra_options_continue_hyper_congo_spin();
+    CHECK(!s_spin_active);
+    CHECK(s_spin_trigger_consumed);
+    CHECK(s_spin_rotations == 0);
+    CHECK(s_spin_callback == func_08007C18_6BAEB8);
+    CHECK(TASK_SPIN_TIMER(s_root.bytes) == 60);
+    CHECK(s_spin_callback_installs == installs);
+    CHECK(s_animation_restart_calls == restarts);
+}
+
+static void test_same_health_damage_event_is_cleared_through_recovery(void)
+{
+    unsigned int revolution;
+
+    begin_spin_fixture(0);
+    for (revolution = 0;
+         revolution < CONGO_HYPER_SPIN_ROTATIONS;
+         revolution++)
+    {
+        run_active_spin_ticks(256);
+    }
+    CHECK(s_spin_trigger_consumed);
+    CHECK(s_spin_trigger_health == TASK_HEALTH(s_root.bytes));
+
+    /* Extra A228 post passes may reassert event B more than once. */
+    s_damage_event_active = 1;
+    extra_options_suppress_requeued_hyper_congo_spin();
+    CHECK(!s_damage_event_active);
+    CHECK(s_damage_event_clear_calls == 1);
+    CHECK(s_spin_trigger_consumed);
+
+    /* The latch deliberately survives native 7C18/7C70/7CBC/751C recovery;
+     * an interleaved A228 post can therefore reassert B without restarting. */
+    s_damage_event_active = 1;
+    extra_options_suppress_requeued_hyper_congo_spin();
+    CHECK(!s_damage_event_active);
+    CHECK(s_damage_event_clear_calls == 2);
+    CHECK(s_spin_trigger_consumed);
+
+    /* A later same-health A228 after 751C is still the consumed threshold. */
+    s_damage_event_active = 1;
+    extra_options_suppress_requeued_hyper_congo_spin();
+    CHECK(!s_damage_event_active);
+    CHECK(s_damage_event_clear_calls == 3);
+    CHECK(s_spin_trigger_consumed);
+}
+
+static void test_genuine_health_change_is_not_suppressed(void)
+{
+    unsigned int revolution;
+
+    begin_spin_fixture(0);
+    for (revolution = 0;
+         revolution < CONGO_HYPER_SPIN_ROTATIONS;
+         revolution++)
+    {
+        run_active_spin_ticks(256);
+    }
+    TASK_HEALTH(s_root.bytes)--;
+    s_damage_event_active = 1;
+    extra_options_suppress_requeued_hyper_congo_spin();
+    CHECK(s_damage_event_active);
+    CHECK(s_damage_event_clear_calls == 0);
+    CHECK(!s_spin_trigger_consumed);
+
+    /* Once released, subsequent A228 returns preserve the genuine event too. */
+    extra_options_suppress_requeued_hyper_congo_spin();
+    CHECK(s_damage_event_active);
+    CHECK(s_damage_event_clear_calls == 0);
+}
+
+static void test_damage_during_spin_windup_preserves_new_threshold(void)
+{
+    unsigned int revolution;
+
+    s_config = 0;
+    bind_root();
+    TASK_HEALTH(s_root.bytes) = 25;
+    D_8016DAB4_16E6B4 = s_root.bytes;
+    extra_options_capture_hyper_congo_spin_trigger(s_root.bytes);
+    CHECK(s_spin_trigger_health == 25);
+
+    /* Damage remains possible during native 79E4 -> 7B58 windup.  Cross into
+     * a new threshold after entry captured the attack's triggering HP. */
+    TASK_HEALTH(s_root.bytes) = 20;
+    TASK_SPIN_TIMER(s_root.bytes) = 0;
+    extra_options_prepare_hyper_congo_spin(s_root.bytes);
+    OBJECT_YAW(s_object.bytes) = CONGO_SPIN_END_YAW;
+    s_spin_callback = func_08007BB0_6BAE50;
+    CHECK(s_spin_active);
+    CHECK(s_spin_trigger_health == 25);
+
+    for (revolution = 0;
+         revolution < CONGO_HYPER_SPIN_ROTATIONS;
+         revolution++)
+    {
+        run_active_spin_ticks(256);
+    }
+
+    CHECK(!s_spin_active);
+    CHECK(s_spin_rotations == 0);
+    CHECK(s_spin_trigger_health == 25);
+    CHECK(!s_spin_trigger_consumed);
+    CHECK(s_spin_callback == func_08007C18_6BAEB8);
+    CHECK(TASK_SPIN_TIMER(s_root.bytes) == 60);
+
+    /* A228's event B now belongs to HP 20, not the consumed HP-25 attack. */
+    s_damage_event_active = 1;
+    extra_options_suppress_requeued_hyper_congo_spin();
+    CHECK(s_damage_event_active);
+    CHECK(s_damage_event_clear_calls == 0);
+    CHECK(!s_spin_trigger_consumed);
+}
+
+static void test_new_spin_transition_reactivates_attack(void)
+{
+    unsigned int revolution;
+
+    begin_spin_fixture(0);
+    for (revolution = 0;
+         revolution < CONGO_HYPER_SPIN_ROTATIONS;
+         revolution++)
+    {
+        run_active_spin_ticks(256);
+    }
+    CHECK(!s_spin_active);
+    CHECK(s_spin_trigger_consumed);
+
+    /* Merely entering 7B58 is not enough; only its timer-zero transition
+     * starts a fresh four-rotation attack. */
+    TASK_SPIN_TIMER(s_root.bytes) = 1;
+    extra_options_prepare_hyper_congo_spin(s_root.bytes);
+    CHECK(!s_spin_active);
+    CHECK(s_spin_trigger_consumed);
+
+    extra_options_capture_hyper_congo_spin_trigger(s_root.bytes);
+    CHECK(!s_spin_trigger_consumed);
+    CHECK(s_spin_trigger_health == TASK_HEALTH(s_root.bytes));
+    TASK_SPIN_TIMER(s_root.bytes) = 0;
+    extra_options_prepare_hyper_congo_spin(s_root.bytes);
+    CHECK(s_spin_active);
+    CHECK(s_spin_rotations == 0);
+    CHECK(!s_spin_trigger_consumed);
+
+    s_spin_callback = func_08007BB0_6BAE50;
+    run_active_spin_ticks(256);
+    CHECK(s_spin_active);
+    CHECK(s_spin_rotations == 1);
+    CHECK(s_spin_callback == func_08007BB0_6BAE50);
+    CHECK(s_spin_callback_installs == 4);
+}
+
+static void test_disabled_spin_keeps_native_single_revolution(void)
+{
+    unsigned int part;
+
+    bind_root();
+    for (part = 0; part < CONGO_PART_COUNT; part++)
+    {
+        initialize_part(part, s_root.bytes);
+        invoke_part_constructor_return(part);
+    }
+    D_8016DAB4_16E6B4 = s_root.bytes;
+    extra_options_capture_hyper_congo_spin_trigger(s_root.bytes);
+    TASK_SPIN_TIMER(s_root.bytes) = 0;
+    extra_options_prepare_hyper_congo_spin(s_root.bytes);
+    OBJECT_YAW(s_object.bytes) = CONGO_SPIN_END_YAW;
+    s_spin_callback = func_08007BB0_6BAE50;
+    run_active_spin_ticks(256);
+
+    CHECK(s_config == 1);
+    CHECK(s_spin_callback == func_08007C18_6BAEB8);
+    CHECK(TASK_SPIN_TIMER(s_root.bytes) == 60);
+    CHECK(s_spin_rotations == 0);
+    CHECK(!s_spin_active);
+    CHECK(!s_spin_trigger_consumed);
+    CHECK(s_spin_callback_installs == 0);
+    CHECK(s_animation_restart_calls == 0);
+}
+
+static void test_spin_reset_and_interruption_guards(void)
+{
+    begin_spin_fixture(0);
+    s_spin_rotations = 3;
+    TASK_SPIN_TIMER(s_root.bytes) = 1;
+    extra_options_prepare_hyper_congo_spin(s_root.bytes);
+    CHECK(s_spin_rotations == 3);
+    TASK_SPIN_TIMER(s_root.bytes) = 0;
+    extra_options_prepare_hyper_congo_spin(s_root.bytes);
+    CHECK(s_spin_rotations == 0);
+
+    /* A return hook reached in another task context cannot inherit Congo's
+     * partial-turn count or reinstall the active callback. */
+    s_spin_rotations = 2;
+    initialize_task(s_other_root.bytes, s_other_object.bytes,
+                    0x323, ENTITY_CONGO, 8);
+    OBJECT_YAW(s_other_object.bytes) = CONGO_SPIN_END_YAW;
+    TASK_SPIN_TIMER(s_other_root.bytes) = 60;
+    D_8016DAB4_16E6B4 = s_other_root.bytes;
+    extra_options_continue_hyper_congo_spin();
+    CHECK(s_spin_rotations == 0);
+    CHECK(s_spin_callback_installs == 0);
+    CHECK(s_animation_restart_calls == 0);
+
+    /* Room invalidation clears a partial attack and every tracked identity. */
+    D_8016DAB4_16E6B4 = s_root.bytes;
+    s_spin_rotations = 2;
+    D_800C7AB2 = 0x01A;
+    extra_options_continue_hyper_congo_spin();
+    CHECK(s_spin_rotations == 0);
+    CHECK(s_tracked_congo.task == 0);
+}
+
+static void test_spin_clip_restart_excludes_invalid_parts(void)
+{
+    begin_spin_fixture(1);
+    TASK_GENERATION(s_model_parts[1].bytes)++;
+    TASK_STATUS(s_model_parts[2].bytes) |= TASK_STATUS_REMOVE_PENDING;
+    set_pointer(s_model_parts[3].bytes, 0xDC, s_other_root.bytes);
+    set_pointer(s_model_parts[4].bytes, 0x18, s_other_object.bytes);
+    TASK_ACTOR_ID(s_model_parts[5].bytes)++;
+    run_active_spin_ticks(256);
+
+    CHECK(s_spin_callback == func_08007BB0_6BAE50);
+    CHECK(s_spin_callback_installs == 1);
+    CHECK(s_animation_restart_calls == 1);
+    CHECK(s_animation_restarts[0].task == s_model_parts[0].bytes);
+    CHECK(s_animation_restarts[0].animation == CONGO_SPIN_ANIMATION_BASE);
+    CHECK(s_animation_restarts[0].rate == 0.05f);
+    CHECK(s_animation_restarts[0].flags == 0);
 }
 
 static void test_native_room_binding_and_transitions(void)
@@ -880,6 +1283,15 @@ int main(void)
     RUN_TEST(test_part_interleave_preserves_each_root_signal);
     RUN_TEST(test_part_mutations_stop_post_and_restore_scheduler_context);
     RUN_TEST(test_part_delegation_obeys_mocked_shared_enable_contract);
+    RUN_TEST(test_hyper_spin_runs_four_continuous_revolutions);
+    RUN_TEST(test_completed_spin_latch_blocks_late_return);
+    RUN_TEST(test_same_health_damage_event_is_cleared_through_recovery);
+    RUN_TEST(test_genuine_health_change_is_not_suppressed);
+    RUN_TEST(test_damage_during_spin_windup_preserves_new_threshold);
+    RUN_TEST(test_new_spin_transition_reactivates_attack);
+    RUN_TEST(test_disabled_spin_keeps_native_single_revolution);
+    RUN_TEST(test_spin_reset_and_interruption_guards);
+    RUN_TEST(test_spin_clip_restart_excludes_invalid_parts);
     RUN_TEST(test_default_disabled_emitter_matches_native);
     RUN_TEST(test_enabled_four_ai_calls_have_fourfold_even_cadence);
     RUN_TEST(test_private_phase_seeding_toggle_and_allocation_failure);

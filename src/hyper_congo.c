@@ -30,6 +30,10 @@
     (*(volatile unsigned short *)((char *)(task) + 0x28))
 #define TASK_RESOURCE(task) \
     (*(void *volatile *)((char *)(task) + 0x2C))
+#define TASK_SPIN_TIMER(task) \
+    (*(volatile unsigned short *)((char *)(task) + 0x8A))
+#define OBJECT_YAW(object) \
+    (*(volatile unsigned short *)((char *)(object) + 0x16))
 
 #define TASK_STATUS_REMOVE_PENDING 0x00000002u
 
@@ -38,6 +42,10 @@
 #define CONGO_FLAME_CAPACITY 32u
 #define CONGO_HEALTH_CONTROLLER 0x04000000u
 #define CONGO_PART_COUNT 6u
+#define CONGO_HYPER_SPIN_ROTATIONS 4u
+#define CONGO_SPIN_END_YAW 0x0360u
+#define CONGO_SPIN_ANIMATION_BASE 12u
+#define CONGO_DAMAGE_EVENT 0x0Bu
 #define TASK_CALLBACK_DISABLED_BIT 0x00800000u
 
 typedef void (*HyperCongoTaskCallback)(void *task, void *object);
@@ -73,7 +81,13 @@ extern void *func_8021DDE8_5D92B8(
     void *owner, HyperCongoTaskCallback initializer, unsigned char task_kind,
     float x, float y, float z, int angle);
 extern void *func_800141C4_14DC4(unsigned int file_id);
+extern void func_80023E40_24A40(unsigned int event);
+extern void func_8003521C_35E1C(HyperCongoTaskCallback callback);
+extern void func_8021664C_5D1B1C(
+    void *task, unsigned int animation, float rate, unsigned int flags);
 extern void func_08000DCC_6B406C(void *task, void *object);
+extern void func_08007BB0_6BAE50(void *task, void *object);
+extern void func_08007C18_6BAEB8(void *task, void *object);
 
 static HyperCongoIdentity s_tracked_congo;
 static unsigned short s_runtime_room;
@@ -85,6 +99,20 @@ static unsigned char s_breath_phase;
 static HyperCongoIdentity s_flames[CONGO_FLAME_CAPACITY];
 static unsigned int s_next_flame;
 static HyperCongoIdentity s_parts[CONGO_PART_COUNT];
+static unsigned char s_spin_rotations;
+static unsigned char s_spin_active;
+static unsigned char s_spin_trigger_consumed;
+static unsigned char s_spin_trigger_health;
+
+static void restart_congo_spin_parts(void *root);
+
+static void clear_congo_spin_state(void)
+{
+    s_spin_rotations = 0;
+    s_spin_active = 0;
+    s_spin_trigger_consumed = 0;
+    s_spin_trigger_health = 0;
+}
 
 static void clear_congo_tracking(void)
 {
@@ -94,11 +122,17 @@ static void clear_congo_tracking(void)
     s_replay_reported = 0;
     s_defeated = 0;
     s_breath_clock_active = 0;
+    clear_congo_spin_state();
     s_next_flame = 0;
     for (index = 0; index < CONGO_FLAME_CAPACITY; index++)
         s_flames[index].task = 0;
     for (index = 0; index < CONGO_PART_COUNT; index++)
         s_parts[index].task = 0;
+}
+
+static int hyper_congo_is_enabled(void)
+{
+    return recomp_get_config_u32("hyper_enemies") == 0;
 }
 
 static int refresh_congo_runtime_state(void)
@@ -170,7 +204,7 @@ void extra_options_track_hyper_congo(void *actor)
         clear_congo_tracking();
         recomp_printf("[Extra Options] Congo tracked: room=0x%03X, Hyper Enemies=%s.\n",
                       (unsigned int)D_800C7AB2,
-                      recomp_get_config_u32("hyper_enemies") == 0
+                      hyper_congo_is_enabled()
                           ? "enabled" : "disabled");
     }
 
@@ -183,6 +217,121 @@ void extra_options_track_hyper_congo(void *actor)
     {
         s_defeated = 1;
     }
+}
+
+/* 79E4 is the exact event-B spin entry, before its animation windup.  Capture
+ * health here so damage during either the windup or the four rotations is a
+ * genuinely new threshold and is not consumed with the current attack. */
+RECOMP_HOOK("func_080079E4_6BAC84")
+void extra_options_capture_hyper_congo_spin_trigger(void *task)
+{
+    if (!hyper_congo_is_enabled())
+    {
+        clear_congo_spin_state();
+        return;
+    }
+
+    if (task == D_8016DAB4_16E6B4 && hyper_congo_is_live(task))
+    {
+        s_spin_trigger_consumed = 0;
+        s_spin_trigger_health = TASK_HEALTH(task);
+    }
+}
+
+/* Native 7BB0 adds four angle units per AI tick and exits when yaw returns
+ * to 0x360, so it always performs exactly one revolution.  Hyper replays
+ * four AI ticks per rendered frame; without compensating for that endpoint,
+ * the spin finishes in one quarter of its native real-time duration and the
+ * wind-down/re-entry animation becomes visible after every short turn.
+ * Keep the native transition only on the fourth continuous revolution. */
+RECOMP_HOOK("func_08007B58_6BADF8")
+void extra_options_prepare_hyper_congo_spin(void *task)
+{
+    if (!hyper_congo_is_enabled())
+    {
+        clear_congo_spin_state();
+        return;
+    }
+
+    if (task == D_8016DAB4_16E6B4 && hyper_congo_is_live(task) &&
+        TASK_SPIN_TIMER(task) == 0)
+    {
+        s_spin_rotations = 0;
+        s_spin_active = 1;
+        s_spin_trigger_consumed = 0;
+    }
+}
+
+RECOMP_HOOK_RETURN("func_08007BB0_6BAE50")
+void extra_options_continue_hyper_congo_spin(void)
+{
+    void *task = D_8016DAB4_16E6B4;
+    void *object;
+
+    if (!hyper_congo_is_enabled() || !hyper_congo_is_live(task))
+    {
+        clear_congo_spin_state();
+        return;
+    }
+
+    /* A completed attack is distinct from a zero-count new attack.  Return
+     * hooks can be delivered after the callback has already moved on; never
+     * interpret one of those late deliveries as another first revolution. */
+    if (!s_spin_active)
+        return;
+
+    object = TASK_OBJECT(task);
+    if (!object || OBJECT_YAW(object) != CONGO_SPIN_END_YAW ||
+        CONGO_TASK_AI(task) != func_08007C18_6BAEB8)
+        return;
+
+    s_spin_rotations++;
+    if (s_spin_rotations < CONGO_HYPER_SPIN_ROTATIONS)
+    {
+        /* Native just installed 7C18 and a 60-tick wind-down.  Reinstall the
+         * active spin callback for the first three boundaries; the fourth
+         * crossing retains the native callback and timer unchanged. */
+        TASK_SPIN_TIMER(task) = 0;
+        func_8003521C_35E1C(func_08007BB0_6BAE50);
+        restart_congo_spin_parts(task);
+    }
+    else
+    {
+        s_spin_rotations = 0;
+        s_spin_active = 0;
+        /* Damage can remain enabled during the extended attack.  Consume
+         * only the threshold that actually started this spin; if health
+         * changed meanwhile, leave the newly generated event B intact. */
+        s_spin_trigger_consumed =
+            TASK_HEALTH(task) == s_spin_trigger_health;
+    }
+}
+
+/* A228 translates Congo's damage thresholds into global event B.  It is part
+ * of Congo's custom post callback, so Hyper's extra post passes can reassert
+ * the same event after the accelerated 73FC -> 7488 -> 74CC -> 751C handoff.
+ * 751C then enters a genuine second 79B0/79E4 spin even though no new damage
+ * occurred.  Native A228 keeps generating B at health 25/20/15/10/5, so mark
+ * the completed threshold as consumed until a real hit changes health. */
+RECOMP_HOOK_RETURN("func_0800A228_6BD4C8")
+void extra_options_suppress_requeued_hyper_congo_spin(void)
+{
+    void *task = D_8016DAB4_16E6B4;
+
+    if (!s_spin_trigger_consumed)
+        return;
+    if (!hyper_congo_is_enabled() || !hyper_congo_is_live(task))
+    {
+        clear_congo_spin_state();
+        return;
+    }
+    if (TASK_HEALTH(task) != s_spin_trigger_health)
+    {
+        s_spin_trigger_consumed = 0;
+        return;
+    }
+
+    func_80023E40_24A40(CONGO_DAMAGE_EVENT);
 }
 
 static void track_congo_part(unsigned int part)
@@ -220,6 +369,24 @@ static int congo_part_matches(const HyperCongoIdentity *identity, void *root)
     return identity_matches(identity, identity->task) &&
            TASK_PART_OWNER(identity->task) == root &&
            (TASK_STATUS(identity->task) & TASK_STATUS_REMOVE_PENDING) == 0;
+}
+
+static void restart_congo_spin_parts(void *root)
+{
+    unsigned int part;
+
+    /* Each limb's spin clip is non-looping.  Restart the validated six clips
+     * at the three suppressed native endpoints so their animation remains
+     * continuous for all four physical revolutions. */
+    for (part = 0; part < CONGO_PART_COUNT; part++)
+    {
+        if (congo_part_matches(&s_parts[part], root))
+        {
+            func_8021664C_5D1B1C(
+                s_parts[part].task,
+                CONGO_SPIN_ANIMATION_BASE + part, 0.05f, 0);
+        }
+    }
 }
 
 static void advance_congo_parts(void *root)
@@ -308,8 +475,7 @@ RECOMP_PATCH void func_0800A04C_6BD2EC(void *task)
     float forward_offset;
     void *child;
 
-    if (recomp_get_config_u32("hyper_enemies") == 0 &&
-        hyper_congo_is_live(task))
+    if (hyper_congo_is_enabled() && hyper_congo_is_live(task))
     {
         if (!s_breath_clock_active)
         {
