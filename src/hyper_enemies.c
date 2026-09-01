@@ -1,5 +1,6 @@
 #include "modding.h"
 #include "extra_options.h"
+#include "hyper_enemies.h"
 #include "recompconfig.h"
 
 /*
@@ -67,7 +68,6 @@
 #define ENTITY_DARUMANYO 0x00CCu
 #define ENTITY_MIND_CONTROL_ROBOT 0x01B0u
 #define ENTITY_BENKEI 0x01C0u
-#define ENTITY_CONGO 0x0323u
 
 #define DANGO_RESOURCE_FILE_ID 0x0018u
 #define DANGO_CHILD_TASK_KIND 6u
@@ -79,7 +79,6 @@
 #define DANGO_ACTIVE_CHILD_COUNT \
     (*(volatile unsigned short *)0x8015CDB4)
 
-#define ROOM_CONGO 0x016u
 #define ROOM_DARUMANYO 0x049u
 #define ROOM_TSURAMI 0x071u
 #define ROOM_DRAGON_FIGHT 0x155u
@@ -125,7 +124,6 @@ static unsigned char s_replay_guard;
 static unsigned char s_mind_control_combat_active;
 static ExtraOptionsTaskCallback s_captured_post_callback;
 
-static HyperActorIdentity s_congo_actor;
 static HyperActorIdentity s_tsurami_actor;
 static HyperActorIdentity s_darumanyo_actor;
 static HyperActorIdentity s_mind_control_robot;
@@ -218,7 +216,6 @@ static void clear_runtime_tracking(void)
     s_capture_valid = 0;
     s_mind_control_combat_active = 0;
     s_captured_post_callback = 0;
-    s_congo_actor.task = 0;
     s_tsurami_actor.task = 0;
     s_darumanyo_actor.task = 0;
     s_mind_control_robot.task = 0;
@@ -336,13 +333,10 @@ static int is_live_hyper_target(void *task)
     if (is_regular_enemy(TASK_ACTOR_ID(task)) || is_dango_wiper_child(task))
         return TASK_HEALTH(task) > 0;
 
-    room = D_800C7AB2;
-    if (tracked_actor_matches(&s_congo_actor, task) && room == ROOM_CONGO &&
-        TASK_ENTITY_ID(task) == ENTITY_CONGO)
-    {
-        return TASK_HEALTH(task) > 0;
-    }
+    if (extra_options_hyper_congo_child_is_live(task))
+        return 1;
 
+    room = D_800C7AB2;
     /* Tsurami enters its native death sequence at one HP. */
     if (tracked_actor_matches(&s_tsurami_actor, task) && room == ROOM_TSURAMI)
         return TASK_HEALTH(task) > 1;
@@ -391,13 +385,6 @@ static void track_boss_actor(HyperActorIdentity *tracked_actor, void *actor)
 /* The multiplayer implementation established these as the exact live boss
  * roots/controllers.  Tracking callbacks avoids broad actor-ID matches for
  * multipart bosses and Benkei's non-combat NPC form. */
-RECOMP_HOOK("func_0800A228_6BD4C8")
-void extra_options_track_hyper_congo(void *actor)
-{
-    if (actor && TASK_ENTITY_ID(actor) == ENTITY_CONGO)
-        track_boss_actor(&s_congo_actor, actor);
-}
-
 RECOMP_HOOK("func_080017F4_6B4A94")
 void extra_options_capture_hyper_tsurami(void *actor)
 {
@@ -558,8 +545,8 @@ void extra_options_run_hyper_thaisamba_tick(void)
     D_8016DAB4_16E6B4 = saved_current_task;
 }
 
-RECOMP_HOOK("func_80218F30_5D4400")
-void extra_options_capture_hyper_actor(void *task)
+void extra_options_hyper_capture_from_post(
+    void *task, ExtraOptionsHyperTargetPredicate target_is_live)
 {
     void *object;
 
@@ -568,9 +555,10 @@ void extra_options_capture_hyper_actor(void *task)
 
     s_capture_valid = 0;
     s_captured_post_callback = 0;
-    if (!hyper_enemies_is_enabled() || !refresh_runtime_state() ||
+    if (!target_is_live || !hyper_enemies_is_enabled() ||
+        !refresh_runtime_state() ||
         task != D_8016DAB4_16E6B4 ||
-        !is_live_hyper_target(task))
+        !target_is_live(task))
     {
         return;
     }
@@ -587,35 +575,38 @@ void extra_options_capture_hyper_actor(void *task)
     s_capture_valid = 1;
 }
 
-RECOMP_HOOK_RETURN("func_80218F30_5D4400")
-void extra_options_run_hyper_actor_tick(void)
+unsigned int extra_options_hyper_run_captured_tick(
+    ExtraOptionsHyperTargetPredicate target_is_live,
+    ExtraOptionsHyperBeforeTick before_tick)
 {
     HyperActorIdentity identity;
     ExtraOptionsTaskCallback ai_callback;
     ExtraOptionsTaskCallback post_callback;
     unsigned int extra_tick;
+    unsigned int completed_ticks = 0;
     unsigned short room;
     void *object;
 
     if (s_replay_guard || !s_capture_valid)
-        return;
+        return 0;
 
     identity = s_captured_actor;
     post_callback = s_captured_post_callback;
     s_capture_valid = 0;
     s_captured_post_callback = 0;
 
-    if (!hyper_enemies_is_enabled() || !refresh_runtime_state() ||
+    if (!target_is_live || !hyper_enemies_is_enabled() ||
+        !refresh_runtime_state() ||
         !identity_matches(&identity) ||
-        !is_live_hyper_target(identity.task) ||
+        !target_is_live(identity.task) ||
         !actor_has_completed_native_update(&identity))
     {
-        return;
+        return 0;
     }
 
     room = D_800C7AB2;
     if (!callback_is_enabled(post_callback))
-        return;
+        return 0;
 
     /* The fresh actor's first completed update registered its identity and
      * returned above, so this is a recurring AI state, not its constructor. */
@@ -626,7 +617,7 @@ void extra_options_run_hyper_actor_tick(void)
          * take effect immediately.  Room, identity, and liveness guards stop
          * a deletion or recycled task slot from receiving another replay. */
         if (D_800C7AB2 != room || !identity_matches(&identity) ||
-            !is_live_hyper_target(identity.task) ||
+            !target_is_live(identity.task) ||
             TASK_POST_CALLBACK(identity.task) != post_callback)
         {
             break;
@@ -635,6 +626,20 @@ void extra_options_run_hyper_actor_tick(void)
         ai_callback = TASK_AI_CALLBACK(identity.task);
         if (!callback_is_enabled(ai_callback))
             break;
+
+        if (before_tick)
+        {
+            before_tick(identity.task);
+            if (D_800C7AB2 != room || !identity_matches(&identity) ||
+                !target_is_live(identity.task) ||
+                TASK_POST_CALLBACK(identity.task) != post_callback)
+            {
+                break;
+            }
+            ai_callback = TASK_AI_CALLBACK(identity.task);
+            if (!callback_is_enabled(ai_callback))
+                break;
+        }
 
         ai_callback(identity.task, identity.object);
 
@@ -652,6 +657,7 @@ void extra_options_run_hyper_actor_tick(void)
             callback_is_enabled(post_callback))
         {
             post_callback(identity.task, object);
+            completed_ticks++;
         }
         else
         {
@@ -659,4 +665,17 @@ void extra_options_run_hyper_actor_tick(void)
         }
     }
     s_replay_guard = 0;
+    return completed_ticks;
+}
+
+RECOMP_HOOK("func_80218F30_5D4400")
+void extra_options_capture_hyper_actor(void *task)
+{
+    extra_options_hyper_capture_from_post(task, is_live_hyper_target);
+}
+
+RECOMP_HOOK_RETURN("func_80218F30_5D4400")
+void extra_options_run_hyper_actor_tick(void)
+{
+    extra_options_hyper_run_captured_tick(is_live_hyper_target, 0);
 }

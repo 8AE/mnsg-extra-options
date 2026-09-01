@@ -1,0 +1,21 @@
+#ifndef HYPER_ENEMIES_H
+#define HYPER_ENEMIES_H
+
+typedef int (*ExtraOptionsHyperTargetPredicate)(void *task);
+typedef void (*ExtraOptionsHyperBeforeTick)(void *task);
+
+/* Boss-specific post callbacks use the ordinary-enemy capture and replay
+ * state so nested callbacks share the same recursion guard and seen cache. */
+void extra_options_hyper_capture_from_post(
+    void *task, ExtraOptionsHyperTargetPredicate target_is_live);
+/* Returns the number of completed extra AI/post pairs (zero when gated).
+ * before_tick, if present, runs under the shared replay guard before each
+ * extra AI call, allowing a multipart boss to consume the preceding tick. */
+unsigned int extra_options_hyper_run_captured_tick(
+    ExtraOptionsHyperTargetPredicate target_is_live,
+    ExtraOptionsHyperBeforeTick before_tick);
+
+/* Congo-owned flames use the common post callback, unlike their boss. */
+int extra_options_hyper_congo_child_is_live(void *task);
+
+#endif
