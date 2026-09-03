@@ -23,4 +23,9 @@ int extra_options_hyper_congo_child_is_live(void *task);
  * projectile constructor, leaving trails and impact effects at native speed. */
 int extra_options_hyper_dharumanyo_projectile_is_live(void *task);
 
+/* Koryuta's room-0x155 flight spawns two overlay-owned enemy children that
+ * inherit the encounter actor ID.  Their exact constructors and recurring
+ * callbacks are validated in the dedicated implementation. */
+int extra_options_hyper_koryuta_enemy_is_live(void *task);
+
 #endif

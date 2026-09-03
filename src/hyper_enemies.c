@@ -77,7 +77,7 @@
     (*(volatile unsigned short *)0x8015CDB4)
 
 #define ROOM_TSURAMI 0x071u
-#define ROOM_DRAGON_FIGHT 0x155u
+#define ROOM_KORYUTA_FLIGHT 0x155u
 #define ROOM_BENKEI 0x171u
 
 #define BENKEI_FIGHT_ACTIVE_FLAG 0x07Au
@@ -334,13 +334,16 @@ static int is_live_hyper_target(void *task)
     if (extra_options_hyper_dharumanyo_projectile_is_live(task))
         return 1;
 
+    if (extra_options_hyper_koryuta_enemy_is_live(task))
+        return 1;
+
     room = D_800C7AB2;
     /* Tsurami enters its native death sequence at one HP. */
     if (tracked_actor_matches(&s_tsurami_actor, task) && room == ROOM_TSURAMI)
         return TASK_HEALTH(task) > 1;
 
     if (tracked_actor_matches(&s_mind_control_robot, task) &&
-        room == ROOM_DRAGON_FIGHT &&
+        room == ROOM_KORYUTA_FLIGHT &&
         TASK_ENTITY_ID(task) == ENTITY_MIND_CONTROL_ROBOT)
     {
         return s_mind_control_combat_active && TASK_HEALTH(task) > 0;
@@ -394,9 +397,9 @@ void extra_options_track_hyper_benkei(void *actor)
     track_boss_actor(&s_benkei_actor, actor);
 }
 
-/* The Dragon Fight robot is a multipart scripted miniboss.  Track only its
- * exact health-bearing child; matching entity 0x1B0 globally would also catch
- * encounter/cutscene tasks that are required for progression. */
+/* Koryuta's flight includes a multipart scripted mind-control robot.  Track
+ * only its exact health-bearing child; matching entity 0x1B0 globally would
+ * also catch encounter/cutscene tasks that are required for progression. */
 RECOMP_HOOK("func_08002D18_703E18")
 void extra_options_capture_hyper_mind_control_robot(void *actor)
 {
