@@ -15,10 +15,15 @@
 #define HYPER_SEEN_CAPACITY 256
 #define HYPER_EXTRA_TICKS 3u
 
+/* Host regressions replace the target's adjacent four-byte callback slots. */
+#ifndef TASK_AI_CALLBACK
 #define TASK_AI_CALLBACK(task) \
     (*(ExtraOptionsTaskCallback volatile *)((char *)(task) + 0x0C))
+#endif
+#ifndef TASK_POST_CALLBACK
 #define TASK_POST_CALLBACK(task) \
     (*(ExtraOptionsTaskCallback volatile *)((char *)(task) + 0x10))
+#endif
 #define TASK_OBJECT(task) \
     (*(void *volatile *)((char *)(task) + 0x18))
 #define TASK_ACTOR_ID(task) \
@@ -76,7 +81,6 @@
 #define DANGO_ACTIVE_CHILD_COUNT \
     (*(volatile unsigned short *)0x8015CDB4)
 
-#define ROOM_TSURAMI 0x071u
 #define ROOM_KORYUTA_FLIGHT 0x155u
 #define ROOM_BENKEI 0x171u
 
@@ -120,7 +124,6 @@ static unsigned char s_replay_guard;
 static unsigned char s_mind_control_combat_active;
 static ExtraOptionsTaskCallback s_captured_post_callback;
 
-static HyperActorIdentity s_tsurami_actor;
 static HyperActorIdentity s_mind_control_robot;
 static HyperActorIdentity s_benkei_actor;
 static HyperSpecialBossIdentity s_thaisamba_special_boss;
@@ -212,7 +215,6 @@ static void clear_runtime_tracking(void)
     s_capture_valid = 0;
     s_mind_control_combat_active = 0;
     s_captured_post_callback = 0;
-    s_tsurami_actor.task = 0;
     s_mind_control_robot.task = 0;
     s_benkei_actor.task = 0;
     s_thaisamba_special_boss.state = 0;
@@ -302,11 +304,29 @@ static int actor_has_completed_native_update(
     return 0;
 }
 
+void extra_options_hyper_forget_task(void *task)
+{
+    unsigned int index;
+
+    if (!task)
+        return;
+
+    for (index = 0; index < HYPER_SEEN_CAPACITY; index++)
+    {
+        if (s_seen_actors[index].task == task)
+            s_seen_actors[index].task = 0;
+    }
+}
+
 static int callback_is_enabled(ExtraOptionsTaskCallback callback)
 {
+#ifdef HYPER_CALLBACK_IS_ENABLED
+    return HYPER_CALLBACK_IS_ENABLED(callback);
+#else
     unsigned int address = (unsigned int)(unsigned long)callback;
 
     return callback && (address & TASK_CALLBACK_DISABLED_BIT) == 0;
+#endif
 }
 
 static int tracked_actor_matches(const HyperActorIdentity *tracked,
@@ -334,14 +354,13 @@ static int is_live_hyper_target(void *task)
     if (extra_options_hyper_dharumanyo_projectile_is_live(task))
         return 1;
 
+    if (extra_options_hyper_tsurami_projectile_is_live(task))
+        return 1;
+
     if (extra_options_hyper_koryuta_enemy_is_live(task))
         return 1;
 
     room = D_800C7AB2;
-    /* Tsurami enters its native death sequence at one HP. */
-    if (tracked_actor_matches(&s_tsurami_actor, task) && room == ROOM_TSURAMI)
-        return TASK_HEALTH(task) > 1;
-
     if (tracked_actor_matches(&s_mind_control_robot, task) &&
         room == ROOM_KORYUTA_FLIGHT &&
         TASK_ENTITY_ID(task) == ENTITY_MIND_CONTROL_ROBOT)
@@ -378,19 +397,8 @@ static void track_boss_actor(HyperActorIdentity *tracked_actor, void *actor)
 
 /* The multiplayer implementation established these as the exact live boss
  * roots/controllers.  Tracking callbacks avoids broad actor-ID matches for
- * multipart bosses and Benkei's non-combat NPC form. */
-RECOMP_HOOK("func_080017F4_6B4A94")
-void extra_options_capture_hyper_tsurami(void *actor)
-{
-    track_boss_actor(&s_tsurami_actor, actor);
-}
-
-RECOMP_HOOK("func_08000388_6B3628")
-void extra_options_track_hyper_tsurami(void *actor)
-{
-    track_boss_actor(&s_tsurami_actor, actor);
-}
-
+ * multipart bosses and Benkei's non-combat NPC form.  Tsurami is handled in
+ * hyper_tsurami.c because its root replaces the common post callback. */
 RECOMP_HOOK("func_08000B98_70ABD8")
 void extra_options_track_hyper_benkei(void *actor)
 {
@@ -564,7 +572,9 @@ unsigned int extra_options_hyper_run_captured_tick(
     ExtraOptionsTaskCallback ai_callback;
     ExtraOptionsTaskCallback post_callback;
     unsigned int extra_tick;
+    unsigned int extra_tick_limit;
     unsigned int completed_ticks = 0;
+    unsigned int tsurami_extra_ticks;
     unsigned short room;
     void *object;
 
@@ -589,10 +599,18 @@ unsigned int extra_options_hyper_run_captured_tick(
     if (!callback_is_enabled(post_callback))
         return 0;
 
+    extra_tick_limit = HYPER_EXTRA_TICKS;
+    if (target_is_live == is_live_hyper_target)
+    {
+        if (extra_options_hyper_tsurami_take_projectile_extra_ticks(
+                identity.task, &tsurami_extra_ticks))
+            extra_tick_limit = tsurami_extra_ticks;
+    }
+
     /* The fresh actor's first completed update registered its identity and
      * returned above, so this is a recurring AI state, not its constructor. */
     s_replay_guard = 1;
-    for (extra_tick = 0; extra_tick < HYPER_EXTRA_TICKS; extra_tick++)
+    for (extra_tick = 0; extra_tick < extra_tick_limit; extra_tick++)
     {
         /* Reload the AI callback between ticks so native state transitions
          * take effect immediately.  Room, identity, and liveness guards stop
