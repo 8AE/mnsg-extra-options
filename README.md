@@ -14,6 +14,14 @@ Extra Options is a standalone mod for Mystical Ninja Starring Goemon: Recompiled
 
 Multiplayer-only damage and Ryo synchronization are not included because they are network packet features rather than standalone gameplay rules.
 
+Kashiwagi's Hyper implementation is isolated in `src/hyper_kashiwagi.c`. It
+accelerates his combat movement, animation, attack timers, travelling shots,
+and the moving copy summoned by his low-health attack
+to 4x in Impact battles, including title-menu boss rush. Intro/outro sequences,
+incoming-hit reactions, player controls, and damage processing retain native
+timing. The ordinary-enemy spawn-rate settings and other bosses' speed settings
+are unchanged.
+
 ## Building
 
 The build requires Bash, Make, a MIPS-capable LLVM Clang, LLD, and `RecompModTool`. Apple Clang cannot target MIPS; on macOS the script automatically selects Homebrew LLVM and LLD.
