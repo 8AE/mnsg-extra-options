@@ -40,14 +40,20 @@ typedef void (*TestTaskCallback)(void *task, void *object);
 static TestTaskCallback test_task_ai(void *task);
 static TestTaskCallback test_task_post(void *task);
 static unsigned int s_phase_flags;
+static unsigned short s_world_frame;
 #define DHARUMANYO_TASK_AI(task) test_task_ai(task)
 #define DHARUMANYO_TASK_POST(task) test_task_post(task)
 #define DHARUMANYO_PHASE_FLAGS s_phase_flags
+#define DHARUMANYO_WORLD_FRAME s_world_frame
 
 #include "../src/hyper_dharumanyo.c"
 
 _Static_assert(ACTOR_DARUMANYO == 0x00CCu,
                "file 31 Dharumanyo must not be confused with actor 0x132");
+_Static_assert(DARUMANYO_MIN_EXTRA_TICKS == 1u,
+               "Dharumanyo's low cadence half must add one tick");
+_Static_assert(DARUMANYO_MAX_EXTRA_TICKS == 2u,
+               "Dharumanyo's high cadence half must add two ticks");
 
 #define CHECK(condition)                                                    \
     do                                                                      \
@@ -84,8 +90,12 @@ static void *s_capture_task;
 static ExtraOptionsHyperTargetPredicate s_capture_predicate;
 static ExtraOptionsHyperTargetPredicate s_replay_predicate;
 static ExtraOptionsHyperBeforeTick s_before_tick;
+static ExtraOptionsHyperTakeTickBudget s_take_tick_budget;
 static int s_capture_live;
 static unsigned int s_completed_replays;
+static unsigned int s_requested_extra_ticks;
+static unsigned int s_forget_task_calls;
+static void *s_last_forgotten_task;
 
 static void set_pointer(void *task, size_t offset, void *value)
 {
@@ -175,6 +185,7 @@ static void initialize_projectile(unsigned int index,
 
 static void construct_projectile(unsigned int index, void *root)
 {
+    unsigned int forget_calls = s_forget_task_calls;
     void *task = s_tasks[index].bytes;
 
     initialize_projectile(index, (unsigned char)(index + 40));
@@ -185,6 +196,44 @@ static void construct_projectile(unsigned int index, void *root)
     set_post(task, func_80218F30_5D4400);
     extra_options_track_hyper_dharumanyo_projectile();
     CHECK(extra_options_hyper_dharumanyo_projectile_is_live(task));
+    CHECK(s_forget_task_calls == forget_calls + 1u);
+    CHECK(s_last_forgotten_task == task);
+}
+
+static unsigned int take_dharumanyo_root_extra_ticks(void *task)
+{
+    unsigned int extra_ticks = 0;
+
+    CHECK(extra_options_hyper_dharumanyo_take_root_extra_ticks(
+        task, &extra_ticks));
+    return extra_ticks;
+}
+
+static unsigned int take_dharumanyo_projectile_extra_ticks(void *task)
+{
+    unsigned int extra_ticks = 0;
+
+    CHECK(extra_options_hyper_dharumanyo_take_projectile_extra_ticks(
+        task, &extra_ticks));
+    return extra_ticks;
+}
+
+static void check_dharumanyo_root_take_rejected(void *task)
+{
+    unsigned int extra_ticks = 0xA5A5A5A5u;
+
+    CHECK(!extra_options_hyper_dharumanyo_take_root_extra_ticks(
+        task, &extra_ticks));
+    CHECK(extra_ticks == 0xA5A5A5A5u);
+}
+
+static void check_dharumanyo_projectile_take_rejected(void *task)
+{
+    unsigned int extra_ticks = 0xA5A5A5A5u;
+
+    CHECK(!extra_options_hyper_dharumanyo_take_projectile_extra_ticks(
+        task, &extra_ticks));
+    CHECK(extra_ticks == 0xA5A5A5A5u);
 }
 
 static void reset_fixture(void)
@@ -197,6 +246,7 @@ static void reset_fixture(void)
     s_config = 1; /* Disabled is the second mod.toml enum entry. */
     s_combat_paused = 0;
     s_phase_flags = 0;
+    s_world_frame = 0;
     s_track_messages = 0;
     s_replay_messages = 0;
     s_last_message[0] = '\0';
@@ -204,8 +254,12 @@ static void reset_fixture(void)
     s_capture_predicate = 0;
     s_replay_predicate = 0;
     s_before_tick = (ExtraOptionsHyperBeforeTick)(size_t)1;
+    s_take_tick_budget = 0;
     s_capture_live = 0;
     s_completed_replays = 0;
+    s_requested_extra_ticks = 0;
+    s_forget_task_calls = 0;
+    s_last_forgotten_task = 0;
     s_runtime_active = 0;
     s_runtime_room = 0;
     clear_dharumanyo_tracking();
@@ -220,6 +274,12 @@ unsigned long recomp_get_config_u32(const char *key)
 {
     CHECK(strcmp(key, "hyper_enemies") == 0);
     return s_config;
+}
+
+void extra_options_hyper_forget_task(void *task)
+{
+    s_forget_task_calls++;
+    s_last_forgotten_task = task;
 }
 
 int recomp_printf(const char *format, ...)
@@ -288,13 +348,41 @@ void extra_options_hyper_capture_from_post(
     s_capture_live = target_is_live && target_is_live(task);
 }
 
-unsigned int extra_options_hyper_run_captured_tick(
+unsigned int extra_options_hyper_run_captured_tick_budgeted(
     ExtraOptionsHyperTargetPredicate target_is_live,
-    ExtraOptionsHyperBeforeTick before_tick)
+    ExtraOptionsHyperBeforeTick before_tick,
+    ExtraOptionsHyperTakeTickBudget take_tick_budget,
+    unsigned int *selected_extra_ticks)
 {
+    void *task = s_capture_task;
+
     s_replay_predicate = target_is_live;
     s_before_tick = before_tick;
+    s_take_tick_budget = take_tick_budget;
+    s_capture_task = 0;
+    s_requested_extra_ticks = 0;
+    if (selected_extra_ticks)
+        *selected_extra_ticks = 0;
+    if (s_config != 0 || !task || !target_is_live ||
+        !target_is_live(task) ||
+        !take_tick_budget ||
+        !take_tick_budget(task, &s_requested_extra_ticks))
+    {
+        return 0;
+    }
+    if (selected_extra_ticks)
+        *selected_extra_ticks = s_requested_extra_ticks;
     return s_completed_replays;
+}
+
+static unsigned int run_dharumanyo_root_frame(
+    void *root, unsigned int completed_replays)
+{
+    s_world_frame++;
+    extra_options_capture_hyper_dharumanyo(root);
+    s_completed_replays = completed_replays;
+    extra_options_run_hyper_dharumanyo_tick();
+    return s_requested_extra_ticks;
 }
 
 static void test_latch_requires_exact_combat_topology(void)
@@ -379,21 +467,49 @@ static void test_parent_capture_and_diagnostic_delegation(void)
     CHECK(s_capture_predicate == hyper_dharumanyo_is_live);
     CHECK(s_capture_live);
 
-    s_completed_replays = DARUMANYO_EXTRA_TICKS;
+    s_completed_replays = DARUMANYO_MIN_EXTRA_TICKS;
     extra_options_run_hyper_dharumanyo_tick();
     CHECK(s_replay_predicate == hyper_dharumanyo_is_live);
     CHECK(s_before_tick == 0);
+    CHECK(s_take_tick_budget ==
+          extra_options_hyper_dharumanyo_take_root_extra_ticks);
+    CHECK(s_requested_extra_ticks == DARUMANYO_MIN_EXTRA_TICKS);
     CHECK(s_replay_messages == 1);
+    CHECK(strcmp(s_last_message,
+                 "[Extra Options] Hyper Dharumanyo active: "
+                 "alternating 1/2 extra AI/movement/animation ticks "
+                 "(2.5x average).\n") == 0);
 
-    extra_options_run_hyper_dharumanyo_tick();
+    /* The neutral state can re-enter 00970 during combat.  Re-observing the
+     * same topology must preserve both root and carrier cadence phases. */
+    extra_options_start_hyper_dharumanyo(root);
+    CHECK(s_track_messages == 1);
+    CHECK(run_dharumanyo_root_frame(
+              root, DARUMANYO_MAX_EXTRA_TICKS) ==
+          DARUMANYO_MAX_EXTRA_TICKS);
+    CHECK(run_dharumanyo_root_frame(
+              root, DARUMANYO_MIN_EXTRA_TICKS) ==
+          DARUMANYO_MIN_EXTRA_TICKS);
+    CHECK(run_dharumanyo_root_frame(
+              root, DARUMANYO_MAX_EXTRA_TICKS) ==
+          DARUMANYO_MAX_EXTRA_TICKS);
     CHECK(s_replay_messages == 1);
 
     reset_fixture();
     s_config = 0;
     latch_boss(0, 1);
-    s_completed_replays = DARUMANYO_EXTRA_TICKS - 1;
-    extra_options_run_hyper_dharumanyo_tick();
+    root = s_tasks[0].bytes;
+    CHECK(run_dharumanyo_root_frame(root, 0) ==
+          DARUMANYO_MIN_EXTRA_TICKS);
+    CHECK(run_dharumanyo_root_frame(
+              root, DARUMANYO_MIN_EXTRA_TICKS) ==
+          DARUMANYO_MAX_EXTRA_TICKS);
     CHECK(s_replay_messages == 0);
+
+    CHECK(run_dharumanyo_root_frame(
+              root, DARUMANYO_MIN_EXTRA_TICKS) ==
+          DARUMANYO_MIN_EXTRA_TICKS);
+    CHECK(s_replay_messages == 1);
 }
 
 static void test_carrier_yaw_phase_steps_and_guards(void)
@@ -402,8 +518,9 @@ static void test_carrier_yaw_phase_steps_and_guards(void)
         0, DARUMANYO_PHASE_2, DARUMANYO_PHASE_3, DARUMANYO_PHASE_4,
         DARUMANYO_PHASE_2 | DARUMANYO_PHASE_4
     };
+    static const unsigned int extra_ticks[] = {1, 2, 1, 2, 1};
     static const unsigned short increments[] = {
-        0x60, 0x90, 0xC0, 0xF0, 0xF0
+        0x20, 0x60, 0x40, 0xA0, 0x50
     };
     unsigned int index;
     void *root;
@@ -416,11 +533,33 @@ static void test_carrier_yaw_phase_steps_and_guards(void)
     carrier = s_tasks[1].bytes;
     D_8016DAB4_16E6B4 = carrier;
 
+    s_phase_flags = 0;
+    DARUMANYO_CARRIER_YAW(carrier) = 0x10;
+    extra_options_advance_hyper_dharumanyo_carrier(carrier);
+    CHECK(DARUMANYO_CARRIER_YAW(carrier) == 0x10);
+
+    /* A carrier never advances without this frame's completed root result. */
+    extra_options_start_hyper_dharumanyo(root);
+    CHECK(run_dharumanyo_root_frame(
+              root, DARUMANYO_MIN_EXTRA_TICKS) ==
+          DARUMANYO_MIN_EXTRA_TICKS);
+    extra_options_advance_hyper_dharumanyo_carrier(carrier);
+    CHECK(DARUMANYO_CARRIER_YAW(carrier) == 0x30);
+    CHECK(run_dharumanyo_root_frame(
+              root, DARUMANYO_MAX_EXTRA_TICKS) ==
+          DARUMANYO_MAX_EXTRA_TICKS);
+    extra_options_advance_hyper_dharumanyo_carrier(carrier);
+    CHECK(DARUMANYO_CARRIER_YAW(carrier) == 0x70);
+    CHECK(s_track_messages == 1);
+
+    /* Starting low, the five phase samples consume 1,2,1,2,1 extra steps. */
     for (index = 0; index < sizeof(phase_flags) / sizeof(phase_flags[0]);
          index++)
     {
         s_phase_flags = phase_flags[index];
         DARUMANYO_CARRIER_YAW(carrier) = 0x10;
+        CHECK(run_dharumanyo_root_frame(root, extra_ticks[index]) ==
+              extra_ticks[index]);
         extra_options_advance_hyper_dharumanyo_carrier(carrier);
         CHECK(DARUMANYO_CARRIER_YAW(carrier) ==
               (unsigned short)(0x10 + increments[index]));
@@ -428,23 +567,87 @@ static void test_carrier_yaw_phase_steps_and_guards(void)
 
     s_phase_flags = 0;
     DARUMANYO_CARRIER_YAW(carrier) = 0x3E0;
+    CHECK(run_dharumanyo_root_frame(
+              root, DARUMANYO_MAX_EXTRA_TICKS) ==
+          DARUMANYO_MAX_EXTRA_TICKS);
     extra_options_advance_hyper_dharumanyo_carrier(carrier);
-    CHECK(DARUMANYO_CARRIER_YAW(carrier) == 0x40);
+    CHECK(DARUMANYO_CARRIER_YAW(carrier) == 0x20);
 
+    /* Every failed gate leaves the next low cadence half unconsumed. */
     s_config = 1;
     DARUMANYO_CARRIER_YAW(carrier) = 0x100;
+    s_world_frame++;
     extra_options_advance_hyper_dharumanyo_carrier(carrier);
     CHECK(DARUMANYO_CARRIER_YAW(carrier) == 0x100);
 
     s_config = 0;
     DARUMANYO_LIVES(carrier) = 0;
+    s_world_frame++;
     extra_options_advance_hyper_dharumanyo_carrier(carrier);
     CHECK(DARUMANYO_CARRIER_YAW(carrier) == 0x100);
     DARUMANYO_LIVES(carrier) = 12;
 
     D_8016DAB4_16E6B4 = root;
+    s_world_frame++;
     extra_options_advance_hyper_dharumanyo_carrier(carrier);
     CHECK(DARUMANYO_CARRIER_YAW(carrier) == 0x100);
+
+    D_8016DAB4_16E6B4 = carrier;
+    CHECK(run_dharumanyo_root_frame(
+              root, DARUMANYO_MIN_EXTRA_TICKS) ==
+          DARUMANYO_MIN_EXTRA_TICKS);
+    extra_options_advance_hyper_dharumanyo_carrier(carrier);
+    CHECK(DARUMANYO_CARRIER_YAW(carrier) == 0x120);
+    CHECK(run_dharumanyo_root_frame(
+              root, DARUMANYO_MAX_EXTRA_TICKS) ==
+          DARUMANYO_MAX_EXTRA_TICKS);
+    extra_options_advance_hyper_dharumanyo_carrier(carrier);
+    CHECK(DARUMANYO_CARRIER_YAW(carrier) == 0x160);
+}
+
+static void test_carrier_uses_root_result_without_consuming_gated_frame(void)
+{
+    void *carrier;
+    void *root;
+
+    reset_fixture();
+    s_config = 0;
+    latch_boss(0, 1);
+    root = s_tasks[0].bytes;
+    carrier = s_tasks[1].bytes;
+    D_8016DAB4_16E6B4 = carrier;
+    DARUMANYO_CARRIER_YAW(carrier) = 0x100;
+
+    CHECK(run_dharumanyo_root_frame(
+              root, DARUMANYO_MIN_EXTRA_TICKS) ==
+          DARUMANYO_MIN_EXTRA_TICKS);
+    extra_options_advance_hyper_dharumanyo_carrier(carrier);
+    CHECK(DARUMANYO_CARRIER_YAW(carrier) == 0x120);
+
+    /* A partial high replay advances the carrier by the one tick that
+     * actually completed, rather than by the selected two-tick budget. */
+    CHECK(run_dharumanyo_root_frame(
+              root, DARUMANYO_MIN_EXTRA_TICKS) ==
+          DARUMANYO_MAX_EXTRA_TICKS);
+    extra_options_advance_hyper_dharumanyo_carrier(carrier);
+    CHECK(DARUMANYO_CARRIER_YAW(carrier) == 0x140);
+
+    /* A root gate publishes a zero result for this frame.  The carrier must
+     * not fall back to selecting (and consuming) the pending low half. */
+    s_world_frame++;
+    s_config = 1;
+    extra_options_capture_hyper_dharumanyo(root);
+    extra_options_run_hyper_dharumanyo_tick();
+    CHECK(s_requested_extra_ticks == 0);
+    s_config = 0;
+    extra_options_advance_hyper_dharumanyo_carrier(carrier);
+    CHECK(DARUMANYO_CARRIER_YAW(carrier) == 0x140);
+
+    CHECK(run_dharumanyo_root_frame(
+              root, DARUMANYO_MIN_EXTRA_TICKS) ==
+          DARUMANYO_MIN_EXTRA_TICKS);
+    extra_options_advance_hyper_dharumanyo_carrier(carrier);
+    CHECK(DARUMANYO_CARRIER_YAW(carrier) == 0x160);
 }
 
 static void test_projectile_constructor_contract(void)
@@ -468,6 +671,12 @@ static void test_projectile_constructor_contract(void)
     set_post(projectile, func_80218F30_5D4400);
     extra_options_track_hyper_dharumanyo_projectile();
     CHECK(extra_options_hyper_dharumanyo_projectile_is_live(projectile));
+    CHECK(s_forget_task_calls == 1u);
+    CHECK(s_last_forgotten_task == projectile);
+    CHECK(take_dharumanyo_projectile_extra_ticks(projectile) ==
+          DARUMANYO_MIN_EXTRA_TICKS);
+    CHECK(take_dharumanyo_projectile_extra_ticks(projectile) ==
+          DARUMANYO_MAX_EXTRA_TICKS);
 
     initialize_projectile(3, 43);
     set_pointer(s_tasks[3].bytes, 0xDC, root);
@@ -490,6 +699,7 @@ static void test_projectile_constructor_contract(void)
     set_pointer(s_tasks[4].bytes, 0xDC, root);
     CHECK(!extra_options_hyper_dharumanyo_projectile_is_live(
         s_tasks[4].bytes));
+    CHECK(s_forget_task_calls == 1u);
 
     initialize_projectile(5, 45);
     set_pointer(s_tasks[5].bytes, 0xDC, root);
@@ -502,6 +712,62 @@ static void test_projectile_constructor_contract(void)
     /* The native constructor can immediately select its falling variant. */
     CHECK(extra_options_hyper_dharumanyo_projectile_is_live(
         s_tasks[5].bytes));
+    CHECK(s_forget_task_calls == 2u);
+    CHECK(s_last_forgotten_task == s_tasks[5].bytes);
+    CHECK(take_dharumanyo_projectile_extra_ticks(s_tasks[5].bytes) ==
+          DARUMANYO_MIN_EXTRA_TICKS);
+    CHECK(take_dharumanyo_projectile_extra_ticks(s_tasks[5].bytes) ==
+          DARUMANYO_MAX_EXTRA_TICKS);
+}
+
+static void test_projectile_cadence_is_independent_and_reregisters_low(void)
+{
+    unsigned int forget_calls;
+    void *first;
+    void *root;
+    void *second;
+
+    reset_fixture();
+    s_config = 0;
+    latch_boss(0, 1);
+    root = s_tasks[0].bytes;
+    construct_projectile(2, root);
+    construct_projectile(3, root);
+    first = s_tasks[2].bytes;
+    second = s_tasks[3].bytes;
+
+    CHECK(take_dharumanyo_root_extra_ticks(root) ==
+          DARUMANYO_MIN_EXTRA_TICKS);
+    CHECK(take_dharumanyo_projectile_extra_ticks(first) ==
+          DARUMANYO_MIN_EXTRA_TICKS);
+    CHECK(take_dharumanyo_projectile_extra_ticks(second) ==
+          DARUMANYO_MIN_EXTRA_TICKS);
+
+    s_world_frame++;
+    CHECK(take_dharumanyo_root_extra_ticks(root) ==
+          DARUMANYO_MAX_EXTRA_TICKS);
+    CHECK(take_dharumanyo_projectile_extra_ticks(first) ==
+          DARUMANYO_MAX_EXTRA_TICKS);
+    CHECK(take_dharumanyo_projectile_extra_ticks(second) ==
+          DARUMANYO_MAX_EXTRA_TICKS);
+
+    CHECK(take_dharumanyo_projectile_extra_ticks(first) ==
+          DARUMANYO_MIN_EXTRA_TICKS);
+    CHECK(take_dharumanyo_projectile_extra_ticks(second) ==
+          DARUMANYO_MIN_EXTRA_TICKS);
+
+    /* A recycled constructor at the same address is a new cadence identity. */
+    forget_calls = s_forget_task_calls;
+    TASK_GENERATION(first)++;
+    extra_options_capture_hyper_dharumanyo_projectile(first);
+    extra_options_track_hyper_dharumanyo_projectile();
+    CHECK(s_forget_task_calls == forget_calls + 1u);
+    CHECK(s_last_forgotten_task == first);
+    CHECK(extra_options_hyper_dharumanyo_projectile_is_live(first));
+    CHECK(take_dharumanyo_projectile_extra_ticks(first) ==
+          DARUMANYO_MIN_EXTRA_TICKS);
+    CHECK(take_dharumanyo_projectile_extra_ticks(first) ==
+          DARUMANYO_MAX_EXTRA_TICKS);
 }
 
 static void test_projectile_exact_identity_rejections(void)
@@ -516,6 +782,10 @@ static void test_projectile_exact_identity_rejections(void)
     root = s_tasks[0].bytes;
     construct_projectile(2, root);
     projectile = s_tasks[2].bytes;
+    CHECK(take_dharumanyo_projectile_extra_ticks(projectile) ==
+          DARUMANYO_MIN_EXTRA_TICKS);
+    CHECK(!extra_options_hyper_dharumanyo_take_projectile_extra_ticks(
+        projectile, 0));
 
     /* A trail-like task with identical public fields is still unregistered. */
     initialize_task(3, ACTOR_DARUMANYO, ENTITY_DARUMANYO_CARRIER,
@@ -524,27 +794,43 @@ static void test_projectile_exact_identity_rejections(void)
     set_pointer(s_tasks[3].bytes, 0xDC, root);
     CHECK(!extra_options_hyper_dharumanyo_projectile_is_live(
         s_tasks[3].bytes));
+    check_dharumanyo_projectile_take_rejected(s_tasks[3].bytes);
 
     set_pointer(projectile, 0xDC, s_tasks[3].bytes);
     CHECK(!extra_options_hyper_dharumanyo_projectile_is_live(projectile));
+    check_dharumanyo_projectile_take_rejected(projectile);
     set_pointer(projectile, 0xDC, root);
 
     TASK_STATUS(projectile) |= TASK_STATUS_REMOVE_PENDING;
     CHECK(!extra_options_hyper_dharumanyo_projectile_is_live(projectile));
+    check_dharumanyo_projectile_take_rejected(projectile);
     TASK_STATUS(projectile) &= ~TASK_STATUS_REMOVE_PENDING;
 
     original_object = TASK_OBJECT(projectile);
     set_pointer(projectile, 0x18, s_objects[4].bytes);
     CHECK(!extra_options_hyper_dharumanyo_projectile_is_live(projectile));
+    check_dharumanyo_projectile_take_rejected(projectile);
     set_pointer(projectile, 0x18, original_object);
 
     original_generation = TASK_GENERATION(projectile);
     TASK_GENERATION(projectile)++;
     CHECK(!extra_options_hyper_dharumanyo_projectile_is_live(projectile));
+    check_dharumanyo_projectile_take_rejected(projectile);
     TASK_GENERATION(projectile) = original_generation;
+
+    TASK_ENTITY_ID(projectile)++;
+    CHECK(!extra_options_hyper_dharumanyo_projectile_is_live(projectile));
+    check_dharumanyo_projectile_take_rejected(projectile);
+    TASK_ENTITY_ID(projectile)--;
+
+    TASK_ACTOR_ID(projectile)++;
+    CHECK(!extra_options_hyper_dharumanyo_projectile_is_live(projectile));
+    check_dharumanyo_projectile_take_rejected(projectile);
+    TASK_ACTOR_ID(projectile)--;
 
     set_post(projectile, wrong_post);
     CHECK(!extra_options_hyper_dharumanyo_projectile_is_live(projectile));
+    check_dharumanyo_projectile_take_rejected(projectile);
     set_post(projectile, func_80218F30_5D4400);
     CHECK(extra_options_hyper_dharumanyo_projectile_is_live(projectile));
 
@@ -552,6 +838,11 @@ static void test_projectile_exact_identity_rejections(void)
     CHECK(extra_options_hyper_dharumanyo_projectile_is_live(projectile));
     set_ai(projectile, wrong_post);
     CHECK(!extra_options_hyper_dharumanyo_projectile_is_live(projectile));
+    check_dharumanyo_projectile_take_rejected(projectile);
+    set_ai(projectile, func_0800284C_6CAA5C);
+    CHECK(extra_options_hyper_dharumanyo_projectile_is_live(projectile));
+    CHECK(take_dharumanyo_projectile_extra_ticks(projectile) ==
+          DARUMANYO_MAX_EXTRA_TICKS);
 }
 
 static void test_death_pause_and_room_stop_root_and_projectile(void)
@@ -566,10 +857,16 @@ static void test_death_pause_and_room_stop_root_and_projectile(void)
     carrier = s_tasks[1].bytes;
     construct_projectile(2, root);
     projectile = s_tasks[2].bytes;
+    CHECK(take_dharumanyo_root_extra_ticks(root) ==
+          DARUMANYO_MIN_EXTRA_TICKS);
+    CHECK(take_dharumanyo_projectile_extra_ticks(projectile) ==
+          DARUMANYO_MIN_EXTRA_TICKS);
 
     DARUMANYO_LIVES(carrier) = 0;
     CHECK(!hyper_dharumanyo_is_live(root));
     CHECK(!extra_options_hyper_dharumanyo_projectile_is_live(projectile));
+    check_dharumanyo_root_take_rejected(root);
+    check_dharumanyo_projectile_take_rejected(projectile);
     DARUMANYO_LIVES(carrier) = 12;
     CHECK(hyper_dharumanyo_is_live(root));
     CHECK(extra_options_hyper_dharumanyo_projectile_is_live(projectile));
@@ -577,14 +874,25 @@ static void test_death_pause_and_room_stop_root_and_projectile(void)
     s_combat_paused = 1;
     CHECK(!hyper_dharumanyo_is_live(root));
     CHECK(!extra_options_hyper_dharumanyo_projectile_is_live(projectile));
+    check_dharumanyo_root_take_rejected(root);
+    check_dharumanyo_projectile_take_rejected(projectile);
     s_combat_paused = 0;
+    s_world_frame++;
+    CHECK(take_dharumanyo_root_extra_ticks(root) ==
+          DARUMANYO_MAX_EXTRA_TICKS);
+    CHECK(take_dharumanyo_projectile_extra_ticks(projectile) ==
+          DARUMANYO_MAX_EXTRA_TICKS);
 
     D_800C7AB2 = 0x4A;
     CHECK(!hyper_dharumanyo_is_live(root));
     CHECK(!extra_options_hyper_dharumanyo_projectile_is_live(projectile));
+    check_dharumanyo_root_take_rejected(root);
+    check_dharumanyo_projectile_take_rejected(projectile);
     D_800C7AB2 = ROOM_DARUMANYO;
     CHECK(!hyper_dharumanyo_is_live(root));
     CHECK(!extra_options_hyper_dharumanyo_projectile_is_live(projectile));
+    check_dharumanyo_root_take_rejected(root);
+    check_dharumanyo_projectile_take_rejected(projectile);
 }
 
 static void test_relatch_clears_old_projectile_registry(void)
@@ -598,6 +906,10 @@ static void test_relatch_clears_old_projectile_registry(void)
     first_root = s_tasks[0].bytes;
     construct_projectile(2, first_root);
     old_projectile = s_tasks[2].bytes;
+    CHECK(take_dharumanyo_root_extra_ticks(first_root) ==
+          DARUMANYO_MIN_EXTRA_TICKS);
+    CHECK(take_dharumanyo_projectile_extra_ticks(old_projectile) ==
+          DARUMANYO_MIN_EXTRA_TICKS);
 
     initialize_boss_pair(3, 4);
     second_root = s_tasks[3].bytes;
@@ -605,11 +917,17 @@ static void test_relatch_clears_old_projectile_registry(void)
     CHECK(hyper_dharumanyo_is_live(second_root));
     CHECK(!hyper_dharumanyo_is_live(first_root));
     CHECK(!extra_options_hyper_dharumanyo_projectile_is_live(old_projectile));
+    check_dharumanyo_root_take_rejected(first_root);
+    check_dharumanyo_projectile_take_rejected(old_projectile);
     CHECK(s_track_messages == 2);
+    CHECK(take_dharumanyo_root_extra_ticks(second_root) ==
+          DARUMANYO_MIN_EXTRA_TICKS);
 
     construct_projectile(5, second_root);
     CHECK(extra_options_hyper_dharumanyo_projectile_is_live(
         s_tasks[5].bytes));
+    CHECK(take_dharumanyo_projectile_extra_ticks(s_tasks[5].bytes) ==
+          DARUMANYO_MIN_EXTRA_TICKS);
 }
 
 int main(void)
@@ -617,7 +935,9 @@ int main(void)
     test_latch_requires_exact_combat_topology();
     test_parent_capture_and_diagnostic_delegation();
     test_carrier_yaw_phase_steps_and_guards();
+    test_carrier_uses_root_result_without_consuming_gated_frame();
     test_projectile_constructor_contract();
+    test_projectile_cadence_is_independent_and_reregisters_low();
     test_projectile_exact_identity_rejections();
     test_death_pause_and_room_stop_root_and_projectile();
     test_relatch_clears_old_projectile_registry();

@@ -3,6 +3,8 @@
 
 typedef int (*ExtraOptionsHyperTargetPredicate)(void *task);
 typedef void (*ExtraOptionsHyperBeforeTick)(void *task);
+typedef int (*ExtraOptionsHyperTakeTickBudget)(
+    void *task, unsigned int *extra_ticks);
 
 /* Boss-specific post callbacks use the ordinary-enemy capture and replay
  * state so nested callbacks share the same recursion guard and seen cache. */
@@ -14,6 +16,13 @@ void extra_options_hyper_capture_from_post(
 unsigned int extra_options_hyper_run_captured_tick(
     ExtraOptionsHyperTargetPredicate target_is_live,
     ExtraOptionsHyperBeforeTick before_tick);
+/* Uses an exact per-target budget selected only after all capture, liveness,
+ * callback, and first-native-update gates pass.  A failed selector aborts. */
+unsigned int extra_options_hyper_run_captured_tick_budgeted(
+    ExtraOptionsHyperTargetPredicate target_is_live,
+    ExtraOptionsHyperBeforeTick before_tick,
+    ExtraOptionsHyperTakeTickBudget take_tick_budget,
+    unsigned int *selected_extra_ticks);
 /* Exact constructor hooks call this before a task's first common post so a
  * recycled eight-bit generation cannot inherit an ancient seen-cache entry. */
 void extra_options_hyper_forget_task(void *task);
@@ -25,6 +34,12 @@ int extra_options_hyper_congo_child_is_live(void *task);
  * Its dedicated implementation admits only children from the exact native
  * projectile constructor, leaving trails and impact effects at native speed. */
 int extra_options_hyper_dharumanyo_projectile_is_live(void *task);
+/* The root and every projectile own independent 1/2-tick cadence phases;
+ * the separate damage carrier follows the root's completed-tick result. */
+int extra_options_hyper_dharumanyo_take_root_extra_ticks(
+    void *task, unsigned int *extra_ticks);
+int extra_options_hyper_dharumanyo_take_projectile_extra_ticks(
+    void *task, unsigned int *extra_ticks);
 
 /* Tsurami's exact attack constructor emits every travelling shot used by
  * all three phases.  Impact and particle children are intentionally omitted. */

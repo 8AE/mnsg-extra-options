@@ -1,9 +1,8 @@
 /*
  * Host regression for the shared Hyper replay loop's per-target tick limit.
- * Tsurami projectile registration itself is covered by hyper_tsurami_test.c;
- * this test proves that the shared common-post path consumes its independent
- * alternating 1/2-tick policy while ordinary enemies retain the normal three
- * synthetic ticks.
+ * Boss-specific registration itself is covered by the dedicated tests; this
+ * proves that the shared common-post path consumes the independent Dharumanyo
+ * and Tsurami 1/2-tick policies while ordinary enemies retain three ticks.
  *
  * Run from the repository root:
  *   xcrun clang -std=c11 -Wall -Wextra -Werror -Wno-unused-parameter \
@@ -54,7 +53,9 @@ static TestTaskCallback test_task_post(void *task);
 
 #define HOST_AI_OFFSET 0x100u
 #define HOST_POST_OFFSET 0x108u
-#define TEST_TASK_COUNT 2u
+#define TEST_TASK_COUNT 3u
+#define DHARUMANYO_TEST_MIN_EXTRA_TICKS 1u
+#define DHARUMANYO_TEST_MAX_EXTRA_TICKS 2u
 #define TSURAMI_TEST_MIN_EXTRA_TICKS 1u
 #define TSURAMI_TEST_MAX_EXTRA_TICKS 2u
 
@@ -71,6 +72,10 @@ static TestBuffer s_tasks[TEST_TASK_COUNT];
 static TestBuffer s_objects[TEST_TASK_COUNT];
 static int s_save_loaded;
 static unsigned long s_config;
+static int s_dharumanyo_registered;
+static unsigned int s_dharumanyo_policy_queries;
+static unsigned int s_dharumanyo_policy_selections;
+static unsigned int s_dharumanyo_cadence_phase;
 static int s_tsurami_registered;
 static unsigned int s_tsurami_policy_queries;
 static unsigned int s_tsurami_policy_selections;
@@ -162,6 +167,10 @@ static void reset_fixture(void)
     D_8020EED0_63A2B0 = 0;
     s_save_loaded = 1;
     s_config = 0;
+    s_dharumanyo_registered = 0;
+    s_dharumanyo_policy_queries = 0;
+    s_dharumanyo_policy_selections = 0;
+    s_dharumanyo_cadence_phase = 0;
     s_tsurami_registered = 0;
     s_tsurami_policy_queries = 0;
     s_tsurami_policy_selections = 0;
@@ -199,8 +208,24 @@ int extra_options_hyper_congo_child_is_live(void *task)
 
 int extra_options_hyper_dharumanyo_projectile_is_live(void *task)
 {
-    (void)task;
-    return 0;
+    return s_dharumanyo_registered && task == s_tasks[1].bytes;
+}
+
+int extra_options_hyper_dharumanyo_take_projectile_extra_ticks(
+    void *task, unsigned int *extra_ticks)
+{
+    s_dharumanyo_policy_queries++;
+    if (!extra_ticks ||
+        !extra_options_hyper_dharumanyo_projectile_is_live(task))
+        return 0;
+
+    *extra_ticks = s_dharumanyo_cadence_phase
+                       ? DHARUMANYO_TEST_MAX_EXTRA_TICKS
+                       : DHARUMANYO_TEST_MIN_EXTRA_TICKS;
+    s_dharumanyo_cadence_phase =
+        s_dharumanyo_cadence_phase ? 0 : 1;
+    s_dharumanyo_policy_selections++;
+    return 1;
 }
 
 int extra_options_hyper_tsurami_projectile_is_live(void *task)
@@ -274,6 +299,13 @@ static void test_registered_tsurami_projectile_alternates_one_two(void)
     CHECK(s_tsurami_policy_queries == 0);
     CHECK(s_tsurami_policy_selections == 0);
 
+    /* A disabled AI is a replay gate, not a consumed low cadence half. */
+    set_callback(task, HOST_AI_OFFSET, 0);
+    CHECK(complete_native_post(task) == 0);
+    CHECK(s_tsurami_policy_queries == 0);
+    CHECK(s_tsurami_policy_selections == 0);
+    set_callback(task, HOST_AI_OFFSET, test_ai_callback);
+
     CHECK(complete_native_post(task) == TSURAMI_TEST_MIN_EXTRA_TICKS);
     CHECK(s_ai_calls[0] == 1u);
     CHECK(s_post_calls[0] == 1u);
@@ -295,19 +327,24 @@ static void test_registered_tsurami_projectile_alternates_one_two(void)
     CHECK(s_tsurami_policy_selections == 4);
 }
 
-static void test_ordinary_enemy_retains_three_ticks_without_advancing_tsurami(void)
+static void test_special_cadences_interleave_while_ordinary_retains_three(void)
 {
+    void *dharumanyo;
     void *ordinary;
     void *tsurami;
 
     reset_fixture();
     initialize_task(0, 0x00CBu);
-    initialize_task(1, 0x00FAu);
+    initialize_task(1, 0x00CCu);
+    initialize_task(2, 0x00FAu);
     tsurami = s_tasks[0].bytes;
-    ordinary = s_tasks[1].bytes;
+    dharumanyo = s_tasks[1].bytes;
+    ordinary = s_tasks[2].bytes;
+    s_dharumanyo_registered = 1;
     s_tsurami_registered = 1;
 
     CHECK(complete_native_post(tsurami) == 0);
+    CHECK(complete_native_post(dharumanyo) == 0);
     CHECK(complete_native_post(ordinary) == 0);
 
     CHECK(complete_native_post(tsurami) ==
@@ -315,19 +352,48 @@ static void test_ordinary_enemy_retains_three_ticks_without_advancing_tsurami(vo
     CHECK(s_tsurami_policy_queries == 1);
     CHECK(s_tsurami_policy_selections == 1);
 
+    CHECK(complete_native_post(dharumanyo) ==
+          DHARUMANYO_TEST_MIN_EXTRA_TICKS);
+    CHECK(s_dharumanyo_policy_selections == 1);
+
     CHECK(complete_native_post(ordinary) == HYPER_EXTRA_TICKS);
     CHECK(HYPER_EXTRA_TICKS == 3u);
-    CHECK(s_ai_calls[1] == 3u);
-    CHECK(s_post_calls[1] == 3u);
-    CHECK(s_tsurami_policy_queries == 2);
+    CHECK(s_ai_calls[2] == 3u);
+    CHECK(s_post_calls[2] == 3u);
+    CHECK(s_dharumanyo_policy_selections == 1);
+    CHECK(s_tsurami_policy_queries == 3);
     CHECK(s_tsurami_policy_selections == 1);
 
     CHECK(complete_native_post(tsurami) ==
           TSURAMI_TEST_MAX_EXTRA_TICKS);
     CHECK(s_ai_calls[0] == 3u);
     CHECK(s_post_calls[0] == 3u);
-    CHECK(s_tsurami_policy_queries == 3);
-    CHECK(s_tsurami_policy_selections == 2);
+    CHECK(complete_native_post(dharumanyo) ==
+          DHARUMANYO_TEST_MAX_EXTRA_TICKS);
+    CHECK(s_ai_calls[1] == 3u);
+    CHECK(s_post_calls[1] == 3u);
+
+    CHECK(complete_native_post(tsurami) ==
+          TSURAMI_TEST_MIN_EXTRA_TICKS);
+    CHECK(complete_native_post(dharumanyo) ==
+          DHARUMANYO_TEST_MIN_EXTRA_TICKS);
+    CHECK(s_ai_calls[0] == 4u);
+    CHECK(s_post_calls[0] == 4u);
+    CHECK(s_ai_calls[1] == 4u);
+    CHECK(s_post_calls[1] == 4u);
+
+    CHECK(complete_native_post(tsurami) ==
+          TSURAMI_TEST_MAX_EXTRA_TICKS);
+    CHECK(complete_native_post(dharumanyo) ==
+          DHARUMANYO_TEST_MAX_EXTRA_TICKS);
+    CHECK(s_ai_calls[0] == 6u);
+    CHECK(s_post_calls[0] == 6u);
+    CHECK(s_ai_calls[1] == 6u);
+    CHECK(s_post_calls[1] == 6u);
+    CHECK(s_dharumanyo_policy_queries == 5);
+    CHECK(s_dharumanyo_policy_selections == 4);
+    CHECK(s_tsurami_policy_queries == 9);
+    CHECK(s_tsurami_policy_selections == 4);
 }
 
 static void test_forget_task_requires_a_fresh_native_post(void)
@@ -359,7 +425,7 @@ static void test_forget_task_requires_a_fresh_native_post(void)
 int main(void)
 {
     test_registered_tsurami_projectile_alternates_one_two();
-    test_ordinary_enemy_retains_three_ticks_without_advancing_tsurami();
+    test_special_cadences_interleave_while_ordinary_retains_three();
     test_forget_task_requires_a_fresh_native_post();
     puts("hyper_replay_limit_test: all checks passed");
     return 0;

@@ -564,9 +564,11 @@ void extra_options_hyper_capture_from_post(
     s_capture_valid = 1;
 }
 
-unsigned int extra_options_hyper_run_captured_tick(
+unsigned int extra_options_hyper_run_captured_tick_budgeted(
     ExtraOptionsHyperTargetPredicate target_is_live,
-    ExtraOptionsHyperBeforeTick before_tick)
+    ExtraOptionsHyperBeforeTick before_tick,
+    ExtraOptionsHyperTakeTickBudget take_tick_budget,
+    unsigned int *selected_extra_ticks)
 {
     HyperActorIdentity identity;
     ExtraOptionsTaskCallback ai_callback;
@@ -574,9 +576,11 @@ unsigned int extra_options_hyper_run_captured_tick(
     unsigned int extra_tick;
     unsigned int extra_tick_limit;
     unsigned int completed_ticks = 0;
-    unsigned int tsurami_extra_ticks;
     unsigned short room;
     void *object;
+
+    if (selected_extra_ticks)
+        *selected_extra_ticks = 0;
 
     if (s_replay_guard || !s_capture_valid)
         return 0;
@@ -599,13 +603,26 @@ unsigned int extra_options_hyper_run_captured_tick(
     if (!callback_is_enabled(post_callback))
         return 0;
 
-    extra_tick_limit = HYPER_EXTRA_TICKS;
-    if (target_is_live == is_live_hyper_target)
+    /* Do not consume an alternating target's cadence half on a frame whose
+     * AI callback is already disabled.  The loop still reloads it before
+     * every replay so native state transitions remain authoritative. */
+    ai_callback = TASK_AI_CALLBACK(identity.task);
+    if (!callback_is_enabled(ai_callback))
+        return 0;
+
+    if (take_tick_budget)
     {
-        if (extra_options_hyper_tsurami_take_projectile_extra_ticks(
-                identity.task, &tsurami_extra_ticks))
-            extra_tick_limit = tsurami_extra_ticks;
+        if (!take_tick_budget(identity.task, &extra_tick_limit) ||
+            extra_tick_limit == 0)
+        {
+            return 0;
+        }
     }
+    else
+        extra_tick_limit = HYPER_EXTRA_TICKS;
+
+    if (selected_extra_ticks)
+        *selected_extra_ticks = extra_tick_limit;
 
     /* The fresh actor's first completed update registered its identity and
      * returned above, so this is a recurring AI state, not its constructor. */
@@ -665,6 +682,34 @@ unsigned int extra_options_hyper_run_captured_tick(
     }
     s_replay_guard = 0;
     return completed_ticks;
+}
+
+static int take_standard_extra_tick_budget(
+    void *task, unsigned int *extra_ticks)
+{
+    if (extra_options_hyper_tsurami_take_projectile_extra_ticks(
+            task, extra_ticks))
+    {
+        return 1;
+    }
+
+    if (extra_options_hyper_dharumanyo_take_projectile_extra_ticks(
+            task, extra_ticks))
+    {
+        return 1;
+    }
+
+    *extra_ticks = HYPER_EXTRA_TICKS;
+    return 1;
+}
+
+unsigned int extra_options_hyper_run_captured_tick(
+    ExtraOptionsHyperTargetPredicate target_is_live,
+    ExtraOptionsHyperBeforeTick before_tick)
+{
+    return extra_options_hyper_run_captured_tick_budgeted(
+        target_is_live, before_tick,
+        take_standard_extra_tick_budget, 0);
 }
 
 RECOMP_HOOK("func_80218F30_5D4400")

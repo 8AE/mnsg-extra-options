@@ -9,9 +9,10 @@
  * states, animation, and projectile spawning, while a linked entity-0xCC
  * carrier owns the twelve real lives and all damage/death transitions.
  *
- * Hyper replays only the visible actor's AI plus its custom post callback.
+ * Hyper alternates one and two replays of only the visible actor's AI plus
+ * its custom post callback, yielding 2.5x over each stable two-frame pair.
  * The damage carrier still receives exactly one collision/damage pass per
- * scheduler frame; its harmless orbit angle is pre-advanced by three steps.
+ * scheduler frame; only its harmless orbit angle gets the same average rate.
  * Only the travelling 02620 projectile is admitted to the common Hyper path.
  * Trail, impact, hit-reaction, phase, and death children remain native-speed.
  */
@@ -43,7 +44,8 @@
 #define DARUMANYO_COMBAT_PAUSED_FLAG 0x016Cu
 
 #define DARUMANYO_PROJECTILE_CAPACITY 16u
-#define DARUMANYO_EXTRA_TICKS 3u
+#define DARUMANYO_MIN_EXTRA_TICKS 1u
+#define DARUMANYO_MAX_EXTRA_TICKS 2u
 #define DARUMANYO_YAW_MASK 0x03FFu
 
 #define DARUMANYO_PHASE_2 0x0200u
@@ -65,6 +67,11 @@ typedef void (*HyperDharumanyoTaskCallback)(void *task, void *object);
 #define DHARUMANYO_PHASE_FLAGS \
     (*(volatile unsigned int *)0x8015CDB4)
 #endif
+#ifndef DHARUMANYO_WORLD_FRAME
+extern unsigned char *D_8015C5C8_15D1C8;
+#define DHARUMANYO_WORLD_FRAME \
+    (*(volatile unsigned short *)(D_8015C5C8_15D1C8 + 0x3ADCE))
+#endif
 
 typedef struct
 {
@@ -72,7 +79,7 @@ typedef struct
     void *object;
     unsigned short actor_id;
     unsigned char generation;
-    unsigned char padding;
+    unsigned char cadence_phase;
 } HyperDharumanyoIdentity;
 
 extern unsigned short D_800C7AB2;
@@ -95,6 +102,14 @@ static unsigned char s_runtime_active;
 static unsigned char s_combat_active;
 static unsigned char s_pending_projectile_valid;
 static unsigned char s_replay_reported;
+static unsigned char s_root_return_guard;
+static unsigned char s_root_cadence_phase;
+static unsigned char s_frame_budget_valid;
+static unsigned char s_frame_extra_ticks;
+static unsigned short s_budget_world_frame;
+static unsigned char s_root_result_valid;
+static unsigned char s_root_completed_extra_ticks;
+static unsigned short s_root_result_world_frame;
 
 static int hyper_dharumanyo_is_enabled(void)
 {
@@ -108,12 +123,25 @@ static void clear_dharumanyo_tracking(void)
     s_dharumanyo.task = 0;
     s_lives_carrier.task = 0;
     s_pending_projectile.task = 0;
+    s_dharumanyo.cadence_phase = 0;
+    s_lives_carrier.cadence_phase = 0;
+    s_pending_projectile.cadence_phase = 0;
     s_next_projectile = 0;
     s_combat_active = 0;
     s_pending_projectile_valid = 0;
     s_replay_reported = 0;
+    s_root_cadence_phase = 0;
+    s_frame_budget_valid = 0;
+    s_frame_extra_ticks = 0;
+    s_budget_world_frame = 0;
+    s_root_result_valid = 0;
+    s_root_completed_extra_ticks = 0;
+    s_root_result_world_frame = 0;
     for (index = 0; index < DARUMANYO_PROJECTILE_CAPACITY; index++)
+    {
         s_projectiles[index].task = 0;
+        s_projectiles[index].cadence_phase = 0;
+    }
 }
 
 static int refresh_dharumanyo_runtime_state(void)
@@ -152,6 +180,31 @@ static void bind_identity(HyperDharumanyoIdentity *identity, void *task)
     identity->object = TASK_OBJECT(task);
     identity->actor_id = TASK_ACTOR_ID(task);
     identity->generation = TASK_GENERATION(task);
+    identity->cadence_phase = 0;
+}
+
+static unsigned int take_extra_tick_budget(unsigned char *cadence_phase)
+{
+    unsigned int extra_ticks = *cadence_phase
+                                   ? DARUMANYO_MAX_EXTRA_TICKS
+                                   : DARUMANYO_MIN_EXTRA_TICKS;
+
+    *cadence_phase = *cadence_phase ? 0 : 1;
+    return extra_ticks;
+}
+
+static unsigned int dharumanyo_frame_extra_tick_budget(void)
+{
+    unsigned short world_frame = DHARUMANYO_WORLD_FRAME;
+
+    if (!s_frame_budget_valid || s_budget_world_frame != world_frame)
+    {
+        s_budget_world_frame = world_frame;
+        s_frame_extra_ticks = (unsigned char)take_extra_tick_budget(
+            &s_root_cadence_phase);
+        s_frame_budget_valid = 1;
+    }
+    return s_frame_extra_ticks;
 }
 
 static int hyper_dharumanyo_is_live(void *task)
@@ -250,16 +303,16 @@ void extra_options_start_hyper_dharumanyo(void *task)
                       (unsigned int)D_800C7AB2,
                       hyper_dharumanyo_is_enabled()
                           ? "enabled" : "disabled");
+        bind_identity(&s_dharumanyo, task);
+        bind_identity(&s_lives_carrier, carrier);
     }
 
-    bind_identity(&s_dharumanyo, task);
-    bind_identity(&s_lives_carrier, carrier);
     s_combat_active = 1;
 }
 
-/* Capture after the native visible-boss post begins, then run three guarded
- * AI/post pairs after it returns.  The separate carrier's 03F84 damage pass
- * is never called here. */
+/* Capture after the native visible-boss post begins, then run the selected
+ * one-or-two guarded AI/post pairs after it returns.  The separate carrier's
+ * 03F84 damage pass is never called here. */
 RECOMP_HOOK("func_08003810_6CBA20")
 void extra_options_capture_hyper_dharumanyo(void *task)
 {
@@ -269,14 +322,32 @@ void extra_options_capture_hyper_dharumanyo(void *task)
 RECOMP_HOOK_RETURN("func_08003810_6CBA20")
 void extra_options_run_hyper_dharumanyo_tick(void)
 {
-    unsigned int ticks = extra_options_hyper_run_captured_tick(
-        hyper_dharumanyo_is_live, 0);
+    unsigned int selected_extra_ticks = 0;
+    unsigned int ticks;
 
-    if (ticks == DARUMANYO_EXTRA_TICKS && !s_replay_reported)
+    /* The selected post callback is replayed directly below, so its return
+     * hook nests.  Only the outer native return may select a cadence half or
+     * publish a carrier ticket. */
+    if (s_root_return_guard)
+        return;
+
+    s_root_return_guard = 1;
+    ticks = extra_options_hyper_run_captured_tick_budgeted(
+        hyper_dharumanyo_is_live, 0,
+        extra_options_hyper_dharumanyo_take_root_extra_ticks,
+        &selected_extra_ticks);
+    s_root_result_world_frame = DHARUMANYO_WORLD_FRAME;
+    s_root_completed_extra_ticks = (unsigned char)ticks;
+    s_root_result_valid = 1;
+    s_root_return_guard = 0;
+
+    if (selected_extra_ticks != 0 &&
+        ticks == selected_extra_ticks && !s_replay_reported)
     {
         s_replay_reported = 1;
         recomp_printf("[Extra Options] Hyper Dharumanyo active: "
-                      "3 extra AI/movement/animation ticks (4x).\n");
+                      "alternating 1/2 extra AI/movement/animation ticks "
+                      "(2.5x average).\n");
     }
 }
 
@@ -294,11 +365,12 @@ static unsigned short dharumanyo_carrier_angle_step(void)
 }
 
 /* 03F84 owns collision, damage, lives, and death, so it must execute once.
- * Pre-add only its three missing orbit-angle steps; native 03F84 supplies the
- * fourth step and computes the carrier position from the final angle. */
+ * Pre-add only the next one-or-two orbit-angle steps; native 03F84 supplies
+ * the first step and computes the carrier position from the final angle. */
 RECOMP_HOOK("func_08003F84_6CC194")
 void extra_options_advance_hyper_dharumanyo_carrier(void *task)
 {
+    unsigned int extra_ticks;
     unsigned int yaw;
 
     if (!hyper_dharumanyo_is_enabled() ||
@@ -309,8 +381,20 @@ void extra_options_advance_hyper_dharumanyo_carrier(void *task)
         return;
     }
 
+    /* The native task list runs the visible root before this linked carrier.
+     * Follow the root's actual completed count so first-seen gates and partial
+     * state transitions cannot advance the orbit or consume cadence alone. */
+    if (!s_root_result_valid ||
+        s_root_result_world_frame != DHARUMANYO_WORLD_FRAME)
+    {
+        return;
+    }
+    extra_ticks = s_root_completed_extra_ticks;
+    if (extra_ticks == 0)
+        return;
+
     yaw = DARUMANYO_CARRIER_YAW(task);
-    yaw += DARUMANYO_EXTRA_TICKS * dharumanyo_carrier_angle_step();
+    yaw += extra_ticks * dharumanyo_carrier_angle_step();
     DARUMANYO_CARRIER_YAW(task) =
         (unsigned short)(yaw & DARUMANYO_YAW_MASK);
 }
@@ -356,6 +440,9 @@ void extra_options_track_hyper_dharumanyo_projectile(void)
         return;
     }
 
+    /* Force the first common post to seed the shared anti-constructor cache,
+     * even when an eight-bit task generation has wrapped on a reused slot. */
+    extra_options_hyper_forget_task(projectile.task);
     register_projectile(&projectile);
 }
 
@@ -378,5 +465,42 @@ int extra_options_hyper_dharumanyo_projectile_is_live(void *task)
     for (index = 0; index < DARUMANYO_PROJECTILE_CAPACITY; index++)
         if (identity_matches(&s_projectiles[index], task))
             return 1;
+    return 0;
+}
+
+int extra_options_hyper_dharumanyo_take_root_extra_ticks(
+    void *task, unsigned int *extra_ticks)
+{
+    if (!task || !extra_ticks)
+        return 0;
+
+    if (identity_matches(&s_dharumanyo, task) &&
+        hyper_dharumanyo_is_live(task))
+    {
+        *extra_ticks = dharumanyo_frame_extra_tick_budget();
+        return 1;
+    }
+
+    return 0;
+}
+
+int extra_options_hyper_dharumanyo_take_projectile_extra_ticks(
+    void *task, unsigned int *extra_ticks)
+{
+    unsigned int index;
+
+    if (!task || !extra_ticks)
+        return 0;
+
+    for (index = 0; index < DARUMANYO_PROJECTILE_CAPACITY; index++)
+    {
+        if (identity_matches(&s_projectiles[index], task) &&
+            extra_options_hyper_dharumanyo_projectile_is_live(task))
+        {
+            *extra_ticks = take_extra_tick_budget(
+                &s_projectiles[index].cadence_phase);
+            return 1;
+        }
+    }
     return 0;
 }
