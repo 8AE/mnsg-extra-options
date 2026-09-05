@@ -11,6 +11,10 @@ if [[ -z "$mod_filename" ]]; then
     echo "Error: could not read inputs.mod_filename from mod.toml." >&2
     exit 1
 fi
+if [[ ! "$mod_filename" =~ ^[a-zA-Z0-9_.-]+$ ]]; then
+    echo "Error: mod_filename must be a plain filename without directory components." >&2
+    exit 1
+fi
 
 if [[ "$(uname -s)" == "Darwin" ]]; then
     if [[ -z "${CC:-}" ]]; then
@@ -72,14 +76,36 @@ if [[ ! -x "$mod_tool" ]]; then
     exit 1
 fi
 
-make clean
-make "${make_args[@]}" "$@"
-"$mod_tool" mod.toml build
-
 package_path="build/${mod_filename}.nrm"
-if [[ ! -f "$package_path" ]]; then
-    echo "Error: RecompModTool did not create $package_path." >&2
-    exit 1
-fi
+debug_package_path="build/debug_${mod_filename}.nrm"
+package_temp_dir="$(mktemp -d "${TMPDIR:-/tmp}/mnsg-extra-options-build.XXXXXX")"
+cleanup_packages() {
+    rm -f -- "$package_temp_dir/debug.nrm"
+    rmdir -- "$package_temp_dir"
+}
+trap cleanup_packages EXIT
+
+build_variant() {
+    local debug_flag="$1"
+    shift
+    make clean
+    # The script owns the variant flag; caller make arguments cannot cause
+    # the normal and debug filenames to accidentally receive the same build.
+    make "${make_args[@]}" "$@" "EXTRA_OPTIONS_DEBUG=$debug_flag"
+    "$mod_tool" mod.toml build
+    if [[ ! -f "$package_path" ]]; then
+        echo "Error: RecompModTool did not create $package_path." >&2
+        exit 1
+    fi
+}
+
+# Stage debug outside build/ because the normal build cleans that directory.
+# Build normal last so build/mod.elf and subsequent plain make runs are safe
+# release defaults. Both packages retain the same mod ID/configuration.
+build_variant 1 "$@"
+mv -- "$package_path" "$package_temp_dir/debug.nrm"
+build_variant 0 "$@"
+mv -- "$package_temp_dir/debug.nrm" "$debug_package_path"
 
 echo "Done: $package_path"
+echo "Done: $debug_package_path"

@@ -32,7 +32,17 @@ Run:
 ./build_mod.sh -j4
 ```
 
-The release package is written to `build/mnsg_extra_options.nrm`. There is no debug package for this mod.
+Each run generates two packages:
+
+- `build/mnsg_extra_options.nrm`: normal build, with debugging compiled out.
+- `build/debug_mnsg_extra_options.nrm`: debug build, with one-hit Impact boss kills enabled.
+
+`src/debug.c` is controlled by the compile-time flag `EXTRA_OPTIONS_DEBUG`.
+The script passes `EXTRA_OPTIONS_DEBUG=1` for debug and `=0` for normal;
+plain `make` defaults to `0`. Switching the flag rebuilds cached objects.
+There is no debug menu setting. The debug build preserves native hit/block,
+defeat, and scripted phase handling, and works independently of Hyper Enemies.
+Both packages share the same mod ID, so install only one at a time.
 
 `build_mod.sh` looks for `RecompModTool` in this repository, in the sibling `mnsg-recomp-example` repository, or on `PATH`. You can also provide an explicit path:
 

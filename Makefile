@@ -1,4 +1,13 @@
 BUILD_DIR := build
+EXTRA_OPTIONS_DEBUG ?= 0
+
+ifneq ($(EXTRA_OPTIONS_DEBUG),0)
+ifneq ($(EXTRA_OPTIONS_DEBUG),1)
+    $(error EXTRA_OPTIONS_DEBUG must be 0 or 1)
+endif
+endif
+
+DEBUG_STAMP := $(BUILD_DIR)/.extra-options-debug-$(EXTRA_OPTIONS_DEBUG)
 
 # Respect explicit toolchain selections while avoiding GNU Make's built-in
 # `cc`/`ld` defaults. Apple Clang cannot target MIPS, so macOS users should
@@ -20,6 +29,7 @@ CFLAGS   := -target mips -mips2 -mabi=32 -O2 -G0 -mno-abicalls -mno-odd-spreg -m
 ASFLAGS  := -target mips -mips2 -mabi=32 -G0 -mno-abicalls -mno-check-zero-division -x assembler-with-cpp -modd-spreg
 CPPFLAGS := -nostdinc -D_LANGUAGE_C -DMIPS -DF3DEX_GBI -I include -I include/dummy_headers \
 			-I mnsg/include -I mnsg/libultra/include -I mnsg/src
+override CPPFLAGS += -DEXTRA_OPTIONS_DEBUG=$(EXTRA_OPTIONS_DEBUG)
 LDFLAGS  := -nostdlib -T $(LDSCRIPT) -Map $(BUILD_DIR)/mod.map --unresolved-symbols=ignore-all --emit-relocs -e 0 --no-nmagic
 
 C_SRCS := $(shell find src -name '*.c' | sort)
@@ -37,11 +47,17 @@ $(TARGET): $(C_OBJS) $(S_OBJS) $(LDSCRIPT) | $(BUILD_DIR)
 $(BUILD_DIR):
 	mkdir -p $@
 
-$(C_OBJS): $(BUILD_DIR)/%.o : %.c | $(BUILD_DIR)
+# Make does not track command-line flag changes. Remove the opposite stamp
+# so switching either way rebuilds objects, even without `make clean`.
+$(DEBUG_STAMP): | $(BUILD_DIR)
+	rm -f $(BUILD_DIR)/.extra-options-debug-0 $(BUILD_DIR)/.extra-options-debug-1
+	touch $@
+
+$(C_OBJS): $(BUILD_DIR)/%.o : %.c $(DEBUG_STAMP) | $(BUILD_DIR)
 	mkdir -p $(@D)
 	$(CC) $(CFLAGS) $(CPPFLAGS) $< -MMD -MF $(@:.o=.d) -c -o $@
 
-$(S_OBJS): $(BUILD_DIR)/%.o : %.s | $(BUILD_DIR)
+$(S_OBJS): $(BUILD_DIR)/%.o : %.s $(DEBUG_STAMP) | $(BUILD_DIR)
 	mkdir -p $(@D)
 	$(CC) $(ASFLAGS) -I src -nostdinc -D_LANGUAGE_C -DMIPS -DF3DEX_GBI -I include -I include/dummy_headers -I mnsg/include -I mnsg/libultra/include -I mnsg/src $< -c -o $@
 
