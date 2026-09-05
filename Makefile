@@ -9,6 +9,13 @@ endif
 
 DEBUG_STAMP := $(BUILD_DIR)/.extra-options-debug-$(EXTRA_OPTIONS_DEBUG)
 
+# Older Make versions compare mtimes at whole-second precision. On a flag
+# switch, force object rebuilding even if the new stamp and old objects have
+# the same timestamp. Once the stamp exists, incremental builds stay cached.
+ifeq ($(wildcard $(DEBUG_STAMP)),)
+    .PHONY: $(DEBUG_STAMP)
+endif
+
 # Respect explicit toolchain selections while avoiding GNU Make's built-in
 # `cc`/`ld` defaults. Apple Clang cannot target MIPS, so macOS users should
 # invoke build_mod.sh, which locates Homebrew LLVM/LLD and passes them here.

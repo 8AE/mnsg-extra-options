@@ -15,6 +15,13 @@
 #include "../src/debug.c"
 
 void *D_8020EED0_63A2B0;
+unsigned char *D_8015C5C8_15D1C8;
+/* Balberra's separate path is exercised by debug_balberra_test.c. */
+int func_801D36CC_5FEAAC(void *task)
+{
+    (void)task;
+    return 0;
+}
 static _Alignas(max_align_t) unsigned char s_battle[0x300];
 
 static void run_debug_hook(int damage)

@@ -51,15 +51,6 @@
 #define BENKEI_LIVES(task) \
     (*(volatile signed char *)((char *)(task) + 0xD3))
 
-#define THAISAMBA_STATE_HEALTH(state) \
-    (*(volatile signed int *)((char *)(state) + 0x60))
-#define THAISAMBA_STATE_BOSS_TASK(state) \
-    (*(void *volatile *)((char *)(state) + 0x1D8))
-#define THAISAMBA_STATE_MODEL_TASK(state) \
-    (*(void *volatile *)((char *)(state) + 0x1E0))
-#define THAISAMBA_STATE_COMBAT_PAUSED(state) \
-    (*(volatile unsigned char *)((char *)(state) + 0x2C0))
-
 #define TASK_STATUS_REMOVE_PENDING 0x00000002u
 #define TASK_CALLBACK_DISABLED_BIT 0x00800000u
 
@@ -97,16 +88,8 @@ typedef struct
     unsigned char padding;
 } HyperActorIdentity;
 
-typedef struct
-{
-    void *state;
-    void *task;
-    void *object;
-} HyperSpecialBossIdentity;
-
 extern void *D_8016DAB4_16E6B4;
 extern unsigned short D_800C7AB2;
-extern void *D_8020EED0_63A2B0;
 extern int func_800240DC_24CDC(int flag_id);
 extern void *func_800141C4_14DC4(unsigned int file_id);
 extern void *func_802171A8_5D2678(
@@ -126,7 +109,6 @@ static ExtraOptionsTaskCallback s_captured_post_callback;
 
 static HyperActorIdentity s_mind_control_robot;
 static HyperActorIdentity s_benkei_actor;
-static HyperSpecialBossIdentity s_thaisamba_special_boss;
 
 static int hyper_enemies_is_enabled(void)
 {
@@ -217,9 +199,6 @@ static void clear_runtime_tracking(void)
     s_captured_post_callback = 0;
     s_mind_control_robot.task = 0;
     s_benkei_actor.task = 0;
-    s_thaisamba_special_boss.state = 0;
-    s_thaisamba_special_boss.task = 0;
-    s_thaisamba_special_boss.object = 0;
 }
 
 static int refresh_runtime_state(void)
@@ -437,101 +416,6 @@ void extra_options_start_hyper_mind_control_robot(void *actor)
     track_boss_actor(&s_mind_control_robot, actor);
     if (tracked_actor_matches(&s_mind_control_robot, actor))
         s_mind_control_combat_active = 1;
-}
-
-/* Thaisamba runs in the file_13 Impact-battle overlay instead of the common
- * room-actor system.  Its unique initializer gives us the exact task and
- * shared battle state without relying on overlapping overlay addresses. */
-RECOMP_HOOK("func_801EF2E0_61A6C0")
-void extra_options_track_hyper_thaisamba(void *task)
-{
-    void *state = D_8020EED0_63A2B0;
-
-    if (!task || !state || !refresh_runtime_state())
-        return;
-
-    s_thaisamba_special_boss.state = state;
-    s_thaisamba_special_boss.task = task;
-    s_thaisamba_special_boss.object = TASK_OBJECT(task);
-}
-
-static int thaisamba_special_boss_is_live(void)
-{
-    void *state = D_8020EED0_63A2B0;
-    void *task = s_thaisamba_special_boss.task;
-    void *object;
-
-    if (!state || state != s_thaisamba_special_boss.state || !task ||
-        THAISAMBA_STATE_BOSS_TASK(state) != task ||
-        !THAISAMBA_STATE_MODEL_TASK(state) ||
-        THAISAMBA_STATE_HEALTH(state) <= 0 ||
-        THAISAMBA_STATE_COMBAT_PAUSED(state) != 0)
-    {
-        return 0;
-    }
-
-    object = TASK_OBJECT(task);
-    if (!object)
-        return 0;
-
-    /* The task object is installed before the initializer normally runs.  A
-     * lazy bind also covers an allocator that finishes it during setup. */
-    if (!s_thaisamba_special_boss.object)
-        s_thaisamba_special_boss.object = object;
-    return object == s_thaisamba_special_boss.object;
-}
-
-/* The dedicated collision dispatcher runs once per Thaisamba frame and is
- * separate from the boss's dynamic AI callback.  After it consumes native
- * damage once, replay only the current AI state so movement, attack timers,
- * and projectile spawning advance four times while collision/damage stays
- * normal. */
-RECOMP_HOOK_RETURN("func_801F6C4C_62202C")
-void extra_options_run_hyper_thaisamba_tick(void)
-{
-    ExtraOptionsTaskCallback callback;
-    unsigned int extra_tick;
-    unsigned short room;
-    void *saved_current_task;
-    void *task;
-
-    if (s_replay_guard || !hyper_enemies_is_enabled() ||
-        !refresh_runtime_state() || !thaisamba_special_boss_is_live())
-    {
-        return;
-    }
-
-    /* State callbacks use the scheduler's current-task global when changing
-     * callbacks or spawning children.  Recreate that native context for the
-     * extra ticks, then restore the scheduler's post-pass value after every
-     * replay even if the callback deletes its own task. */
-    task = s_thaisamba_special_boss.task;
-    room = D_800C7AB2;
-    saved_current_task = D_8016DAB4_16E6B4;
-    s_replay_guard = 1;
-    for (extra_tick = 0; extra_tick < HYPER_EXTRA_TICKS; extra_tick++)
-    {
-        if (D_800C7AB2 != room || !thaisamba_special_boss_is_live())
-            break;
-
-        callback = TASK_AI_CALLBACK(task);
-        if (!callback_is_enabled(callback))
-            break;
-
-        D_8016DAB4_16E6B4 = task;
-        callback(task, s_thaisamba_special_boss.object);
-
-        /* A task deletion or transition can replace the scheduler's current
-         * task.  Do not replay a stale task after that native state change. */
-        if (D_8016DAB4_16E6B4 != task)
-        {
-            D_8016DAB4_16E6B4 = saved_current_task;
-            break;
-        }
-        D_8016DAB4_16E6B4 = saved_current_task;
-    }
-    s_replay_guard = 0;
-    D_8016DAB4_16E6B4 = saved_current_task;
 }
 
 void extra_options_hyper_capture_from_post(
