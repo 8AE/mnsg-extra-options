@@ -5,8 +5,8 @@ version = "1.0.0"
 display_name = "Extra Options"
 description = """
 Adds optional gameplay challenges to Mystical Ninja Starring Goemon: Recompiled. \
-Configure No Hit, 1 Life, Loose Ryo on hit, Hyper Enemies, and the experimental Enemy Multiplier from the mod menu."""
-short_description = "Optional No Hit, 1 Life, Ryo loss, Hyper Enemies, and enemy multiplier challenges."
+Configure No Hit, 1 Life, Loose Ryo on hit, Hyper Enemies, Enemy Multiplier, and Game Over to Title from the mod menu."""
+short_description = "Optional No Hit, 1 Life, Ryo loss, Hyper Enemies, enemy multiplier, and game-over-to-title challenges."
 authors = ["Killzbro"]
 game_id = "mnsg"
 minimum_recomp_version = "0.1.0"
@@ -52,6 +52,14 @@ description = "Experimental. Choose how many copies of each supported enemy spaw
 type = "Enum"
 options = ["1x (Normal)", "2x", "3x"]
 default = "1x (Normal)"
+
+[[manifest.config_options]]
+id = "game_over_to_title"
+name = "Game Over to Title"
+description = "Skip the game over screen and return to the title screen as soon as the player runs out of lives."
+type = "Enum"
+options = ["Enabled", "Disabled"]
+default = "Disabled"
 
 [inputs]
 

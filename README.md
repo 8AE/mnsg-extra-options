@@ -11,6 +11,7 @@ Extra Options is a standalone mod for Mystical Ninja Starring Goemon: Recompiled
 | Loose Ryo on hit | Disabled | Each damaging hit removes 50 Ryo and plays the native floating `-50 Ryo` robbery effect. |
 | Hyper Enemies | Disabled | Gives supported enemies, enemy obstacles, and boss controllers 4x movement and attack cadence (2.5x average for Dharumanyo and Tsurami) while retaining their native physics and collision processing. |
 | Enemy Multiplier | 1x (Normal) | Spawns two or three copies of supported enemy actors. This option is experimental and may crash the game. |
+| Game Over to Title | Disabled | Skips the game over continue/goodbye menu and returns to the title screen as soon as the player runs out of lives. |
 
 Multiplayer-only damage and Ryo synchronization are not included because they are network packet features rather than standalone gameplay rules.
 
@@ -86,4 +87,6 @@ The production-hook guard tests can run independently:
 ```sh
 cc -std=c11 -Wall -Wextra -Werror -I include tests/hyper_detoile_test.c -o /tmp/hyper_detoile_test
 /tmp/hyper_detoile_test
+cc -std=c11 -Wall -Wextra -Werror -I include tests/game_over_to_title_test.c -o /tmp/game_over_to_title_test
+/tmp/game_over_to_title_test
 ```
