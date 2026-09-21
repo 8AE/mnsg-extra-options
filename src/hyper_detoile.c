@@ -1,6 +1,14 @@
 #include "modding.h"
 #include "recompconfig.h"
 #include "recomputils.h"
+#include "hyper_enemies.h"
+
+/* Independent 2.5x cadence clocks for the root, its owned children, the
+ * travelling projectile motion helper and the aura timers. */
+#define DETOILE_CLOCK_ROOT 8u
+#define DETOILE_CLOCK_CHILD 9u
+#define DETOILE_CLOCK_MOTION 10u
+#define DETOILE_CLOCK_AURA 11u
 
 /* D'Etoile: USA file_13, ROM 5F6840 / VRAM 801CB460, decompressed ROM
  * SHA1 6ea0ed71032ce08fc2745f412d84936382197494. 801FFF70 allocates the
@@ -187,12 +195,15 @@ void extra_options_run_hyper_detoile_tick(void)
     if (s_detoile_frame_valid && s_detoile_frame == DETOILE_FRAME) return;
     s_detoile_frame = DETOILE_FRAME;
     s_detoile_frame_valid = 1;
+    extra_options_hyper_impact_cadence_begin(DETOILE_CLOCK_ROOT, DETOILE_FRAME);
     task = s_detoile_root;
     epoch = s_detoile_epoch;
     saved_current = D_8016DAB4_16E6B4;
     s_detoile_root_guard = 1;
     s_detoile_retired = 0;
-    for (tick = 0; tick < 3; ++tick) {
+    for (tick = 0;
+         tick < extra_options_hyper_impact_extra_ticks(DETOILE_CLOCK_ROOT);
+         ++tick) {
         DetoileCallback callback;
         if (s_detoile_retired || epoch != s_detoile_epoch || !detoile_live() ||
             recomp_get_config_u32("hyper_enemies") != 0) break;
@@ -212,9 +223,10 @@ void extra_options_run_hyper_detoile_tick(void)
     /* This hook belongs to the damage dispatcher, not the replayed root. */
     D_8016DAB4_16E6B4 = saved_current;
     s_detoile_root_guard = 0;
-    if (tick == 3 && epoch == s_detoile_epoch && detoile_live() &&
+    if (tick == extra_options_hyper_impact_extra_ticks(DETOILE_CLOCK_ROOT) &&
+        epoch == s_detoile_epoch && detoile_live() &&
         !s_detoile_reported) {
-        recomp_printf("[Extra Options] D'Etoile Hyper: 4x movement, animation, attacks, and projectiles active.\n");
+        recomp_printf("[Extra Options] D'Etoile Hyper: 2.5x movement, animation, attacks, and projectiles active.\n");
         s_detoile_reported = 1;
     }
 }
@@ -243,7 +255,10 @@ static void detoile_run_child(void)
         return;
     }
     s_detoile_child_guard = 1;
-    for (tick = 0; tick < 3; ++tick) {
+    extra_options_hyper_impact_cadence_begin(DETOILE_CLOCK_CHILD, DETOILE_FRAME);
+    for (tick = 0;
+         tick < extra_options_hyper_impact_extra_ticks(DETOILE_CLOCK_CHILD);
+         ++tick) {
         DetoileCallback callback;
         if (s_detoile_retired || epoch != s_detoile_epoch || !detoile_live() ||
             recomp_get_config_u32("hyper_enemies") != 0 ||
@@ -325,13 +340,19 @@ void extra_options_detoile_projectile_motion(void *task)
         DETOILE_POINTER(task, 0x18) != s_detoile_shot_object ||
         recomp_get_config_u32("hyper_enemies") != 0 || !detoile_live()) return;
     s_detoile_motion_guard = 1;
-    for (tick = 0; tick < 3; ++tick) func_801D614C_60152C(task);
+    extra_options_hyper_impact_cadence_begin(
+        DETOILE_CLOCK_MOTION, DETOILE_FRAME);
+    for (tick = 0;
+         tick < extra_options_hyper_impact_extra_ticks(DETOILE_CLOCK_MOTION);
+         ++tick)
+        func_801D614C_60152C(task);
     s_detoile_motion_guard = 0;
 }
 
 /* Aura callbacks allocate a material each invocation. Advance just their
- * documented alpha/orbit/pulse clocks three extra ticks; native code then
- * computes the final pose and allocates the material once, as before.
+ * documented alpha/orbit/pulse clocks by the frame's extra tick budget;
+ * native code then computes the final pose and allocates the material once,
+ * as before.
  */
 static void detoile_aura_clock(void *task, void *object, DetoileCallback callback,
                                int orbiter)
@@ -340,7 +361,10 @@ static void detoile_aura_clock(void *task, void *object, DetoileCallback callbac
     if (!task || !object || D_8016DAB4_16E6B4 != task ||
         recomp_get_config_u32("hyper_enemies") != 0 || !detoile_live() ||
         DETOILE_POINTER(task, 0x18) != object || DETOILE_AI(task) != callback) return;
-    for (tick = 0; tick < 3; ++tick) {
+    extra_options_hyper_impact_cadence_begin(DETOILE_CLOCK_AURA, DETOILE_FRAME);
+    for (tick = 0;
+         tick < extra_options_hyper_impact_extra_ticks(DETOILE_CLOCK_AURA);
+         ++tick) {
         int alpha = DETOILE_S32(task, 0x90);
         if (D_8020EF40_63A320[0x817]) {
             if (alpha < (orbiter ? 255 : 200)) ++alpha;

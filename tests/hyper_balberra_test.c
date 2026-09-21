@@ -24,6 +24,7 @@ static unsigned short encounter, frame;
 #define BALBERRA_ENABLED_CALLBACK(f) ((f) != 0)
 #define BALBERRA_ENCOUNTER encounter
 #define BALBERRA_FRAME frame
+#include "../src/hyper_impact_cadence.c"
 #include "../src/hyper_balberra.c"
 
 #define CHECK(x) do { if (!(x)) { fprintf(stderr, "%d: %s\n", __LINE__, #x); exit(1); } } while (0)
@@ -152,6 +153,9 @@ BALBERRA_SHOTS(MOCK_SHOT)
 
 static void reset(void)
 {
+    /* Production keeps each Impact clock's phase for the whole session; the
+     * fixtures share one process, so start every case from the low half. */
+    memset(s_impact_clocks, 0, sizeof(s_impact_clocks));
     memset(&state, 0, sizeof(state));
     memset(tasks, 0, sizeof(tasks));
     memset(objects, 0, sizeof(objects));
@@ -179,14 +183,32 @@ static void reset(void)
 static void tick(Fixture *task)
 { D_8016DAB4_16E6B4 = task; task->ai(task, task->object); }
 
+/* A Hyper frame runs the native callback once plus the frame's 1/2 replays. */
+static unsigned int root_extra_ticks(void)
+{
+    return extra_options_hyper_impact_extra_ticks(BALBERRA_CLOCK_ROOT);
+}
+
+static unsigned int part_extra_ticks(void)
+{
+    return extra_options_hyper_impact_extra_ticks(BALBERRA_CLOCK_PART);
+}
+
+static unsigned int shot_extra_ticks(void)
+{
+    return extra_options_hyper_impact_extra_ticks(BALBERRA_CLOCK_SHOT);
+}
+
 static void test_all_clocks(void)
 {
 #define TEST_CALLBACK(name, kind) do { \
     reset(); \
     Fixture *task = kind == BALBERRA_ROOT ? &tasks[0] : &tasks[1]; \
     task->ai = name; tick(task); \
-    CHECK(task->calls == 4); CHECK(task->position == 4.0f); \
-    CHECK(task->animation == 4.0f); CHECK(task->shots == 1); \
+    unsigned int budget = kind == BALBERRA_ROOT ? root_extra_ticks() : part_extra_ticks(); \
+    unsigned int expected = 1u + budget; \
+    CHECK(task->calls == expected); CHECK(task->position == (float)expected); \
+    CHECK(task->animation == (float)expected); CHECK(task->shots == 1); \
     CHECK(D_8016DAB4_16E6B4 == task); \
     if (kind == BALBERRA_ROOT || kind == BALBERRA_PART) \
         CHECK(BALBERRA_S32(task, 0xB0) == 39); \
@@ -206,14 +228,30 @@ static void test_lifecycle(void)
         CHECK(D_8016DAB4_16E6B4 ==
             (stops[i] == REPLACE_CONTEXT || stops[i] == RETIRE ? &tasks[3] : &tasks[0]));
     }
-    reset(); behavior = TRANSITION; tick(&tasks[0]); CHECK(tasks[0].calls == 4);
+    reset(); behavior = TRANSITION; tick(&tasks[0]);
+    CHECK(tasks[0].calls == 1u + root_extra_ticks());
     reset(); config = 1; tick(&tasks[0]); CHECK(tasks[0].calls == 1);
     reset(); encounter = 4; tick(&tasks[0]); CHECK(tasks[0].calls == 1);
     reset(); BALBERRA_ID(&tasks[0]) = 0x64; tick(&tasks[0]); CHECK(tasks[0].calls == 1);
     reset(); BALBERRA_S32(&tasks[0], 0xAC) = 0; tick(&tasks[0]); CHECK(tasks[0].calls == 1);
-    reset(); tick(&tasks[0]); tick(&tasks[0]); CHECK(tasks[0].calls == 5);
-    ++frame; tick(&tasks[0]); CHECK(tasks[0].calls == 9);
-    reset(); frame = 0xFFFF; tick(&tasks[0]); frame = 0; tick(&tasks[0]); CHECK(tasks[0].calls == 8);
+    reset();
+    {
+        /* One native call plus the frame's replays, then a second native call
+         * on the same frame (its replay is frame-gated). */
+        unsigned int first = 1u + root_extra_ticks();
+        tick(&tasks[0]); tick(&tasks[0]);
+        CHECK(tasks[0].calls == first + 1u);
+        ++frame; tick(&tasks[0]);
+        CHECK(tasks[0].calls == first + 1u + 1u + root_extra_ticks());
+    }
+    reset();
+    {
+        unsigned int first;
+        frame = 0xFFFF; tick(&tasks[0]);
+        first = 1u + root_extra_ticks();
+        frame = 0; tick(&tasks[0]);
+        CHECK(tasks[0].calls == first + 1u + root_extra_ticks());
+    }
     reset(); behavior = NATIVE_RETIRE;
     tasks[1].ai = func_80204C5C_63003C; tick(&tasks[1]);
     CHECK(tasks[1].calls == 1); CHECK(D_8016DAB4_16E6B4 == &tasks[3]);

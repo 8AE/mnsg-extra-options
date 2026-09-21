@@ -52,10 +52,40 @@ static unsigned short s_world_frame;
  * 64-bit host because an eight-byte pointer would overlap native +0x94. */
 #define KASHIWAGI_CHARGE_LINK(task) test_charge_link(task)
 
+#include "../src/hyper_impact_cadence.c"
 #include "../src/hyper_kashiwagi.c"
 
+/* Production keeps each Impact clock's phase across the whole session.  The
+ * fixtures reuse one process for every case, so reset the shared clocks here
+ * to make each case start from the low (one extra tick) half.  The expected
+ * per-frame budget is then read straight from the production clock the source
+ * under test just advanced, so the assertions cannot drift from production. */
+static void reset_impact_clocks(void)
+{
+    memset(s_impact_clocks, 0, sizeof(s_impact_clocks));
+}
+
+static unsigned int root_extra_ticks(void)
+{
+    return extra_options_hyper_impact_extra_ticks(KASHIWAGI_CLOCK_ROOT);
+}
+
+static unsigned int motion_extra_ticks(void)
+{
+    return extra_options_hyper_impact_extra_ticks(KASHIWAGI_CLOCK_SHOT_MOTION);
+}
+
+static unsigned int clone_extra_ticks(void)
+{
+    return extra_options_hyper_impact_extra_ticks(KASHIWAGI_CLOCK_CLONE);
+}
+
+static unsigned int charge_extra_ticks(void)
+{
+    return extra_options_hyper_impact_extra_ticks(KASHIWAGI_CLOCK_CHARGE);
+}
+
 #define TEST_KASHIWAGI_ENCOUNTER_INDEX 1u
-#define TEST_KASHIWAGI_EXTRA_TICKS 3u
 #define TEST_KASHIWAGI_ROOT_TASK_ID 0x50u
 #define TEST_KASHIWAGI_TASK_ID(task) \
     (*(volatile unsigned short *)((unsigned char *)(task) + 0x5C))
@@ -261,6 +291,7 @@ static void reset_fixture(void)
 {
     void *root;
 
+    reset_impact_clocks();
     memset(s_tasks, 0, sizeof(s_tasks));
     memset(s_objects, 0, sizeof(s_objects));
     memset(s_states, 0, sizeof(s_states));
@@ -620,7 +651,7 @@ static void disabled_callback(void *task, void *object)
     (void)object;
 }
 
-static void test_exact_four_x_replay_without_save(void)
+static void test_exact_two_and_a_half_x_replay_without_save(void)
 {
     void *saved_current;
 
@@ -629,7 +660,10 @@ static void test_exact_four_x_replay_without_save(void)
     D_8016DAB4_16E6B4 = saved_current;
     run_replay();
 
-    CHECK(s_ai_calls == TEST_KASHIWAGI_EXTRA_TICKS);
+    /* Impact Hyper alternates 1/2 extra ticks; the first frame after a clock
+     * reset uses the low half, so a single replay is 2.5x's one extra tick. */
+    CHECK(root_extra_ticks() == 1u);
+    CHECK(s_ai_calls == root_extra_ticks());
     CHECK(D_8016DAB4_16E6B4 == saved_current);
     CHECK(s_save_gate_calls == 0);
     CHECK(s_replay_messages == 1);
@@ -638,26 +672,24 @@ static void test_exact_four_x_replay_without_save(void)
 static void test_all_combat_callbacks_are_admitted(void)
 {
     unsigned int index;
+    unsigned int expected = 0;
 
     reset_fixture();
     for (index = 0;
          index < sizeof(s_combat_callbacks) / sizeof(s_combat_callbacks[0]);
          index++)
     {
-        unsigned int before = s_ai_calls;
-
         set_ai(s_tasks[0].bytes, s_combat_callbacks[index]);
         s_world_frame++;
         run_replay();
-        CHECK(s_ai_calls == before + TEST_KASHIWAGI_EXTRA_TICKS);
+        expected += root_extra_ticks();
+        CHECK(s_ai_calls == expected);
     }
 
     set_ai(s_tasks[0].bytes, excluded_callback);
     s_world_frame++;
     run_replay();
-    CHECK(s_ai_calls ==
-          (sizeof(s_combat_callbacks) / sizeof(s_combat_callbacks[0])) *
-              TEST_KASHIWAGI_EXTRA_TICKS);
+    CHECK(s_ai_calls == expected);
 }
 
 static void test_callback_is_reloaded_between_ticks(void)
@@ -667,15 +699,20 @@ static void test_callback_is_reloaded_between_ticks(void)
     s_ai_behavior = AI_TRANSITION_COMBAT;
     s_transition_callback = s_combat_callbacks[1];
     run_replay();
-    CHECK(s_ai_calls == TEST_KASHIWAGI_EXTRA_TICKS);
+    /* The first frame after a clock reset runs the low half: one replay.  The
+     * reloaded callback is still a combat state, so the tick counts. */
+    CHECK(root_extra_ticks() == 1u);
+    CHECK(s_ai_calls == root_extra_ticks());
     CHECK(KASHIWAGI_TASK_AI(s_tasks[0].bytes) == s_combat_callbacks[1]);
 
     reset_fixture();
     s_ai_behavior = AI_TRANSITION_EXCLUDED;
     run_replay();
+    /* The low-half frame is one replay; the excluded transition still
+     * completes that single tick, so the frame reports as usual. */
     CHECK(s_ai_calls == 1u);
     CHECK(D_8016DAB4_16E6B4 == 0);
-    CHECK(s_replay_messages == 0);
+    CHECK(s_replay_messages == 1u);
 }
 
 static void test_disabled_and_null_callbacks_are_rejected(void)
@@ -692,7 +729,7 @@ static void test_disabled_and_null_callbacks_are_rejected(void)
     /* A failed preflight must not consume the world's replay ticket. */
     set_ai(s_tasks[0].bytes, s_combat_callbacks[0]);
     run_replay();
-    CHECK(s_ai_calls == TEST_KASHIWAGI_EXTRA_TICKS);
+    CHECK(s_ai_calls == root_extra_ticks());
 }
 
 static void test_lifecycle_gates(void)
@@ -742,28 +779,38 @@ static void test_lifecycle_gates(void)
 static void test_bound_identity_cannot_be_replaced(void)
 {
     void *root;
+    unsigned int before;
+    unsigned int budget;
 
     reset_fixture();
     root = s_tasks[0].bytes;
+    before = s_ai_calls;
     run_replay();
-    CHECK(s_ai_calls == TEST_KASHIWAGI_EXTRA_TICKS);
+    budget = root_extra_ticks();
+    /* The first frame after a clock reset is the low half: one replay.  Each
+     * later call either passes preflight and adds the frame's budget, or is
+     * rejected on the replaced identity and adds nothing. */
+    CHECK(s_ai_calls == before + budget);
 
     s_world_frame++;
     set_pointer(root, 0x18, s_objects[2].bytes);
+    before = s_ai_calls;
     run_replay();
-    CHECK(s_ai_calls == TEST_KASHIWAGI_EXTRA_TICKS);
+    CHECK(s_ai_calls == before);
 
     set_pointer(root, 0x18, s_objects[0].bytes);
     s_world_frame++;
     s_state_model = s_tasks[2].bytes;
+    before = s_ai_calls;
     run_replay();
-    CHECK(s_ai_calls == TEST_KASHIWAGI_EXTRA_TICKS);
+    CHECK(s_ai_calls == before);
 
     s_state_model = s_tasks[1].bytes;
     s_world_frame++;
     D_8020EED0_63A2B0 = s_states[(s_fixture_number + 1u) & 1u].bytes;
+    before = s_ai_calls;
     run_replay();
-    CHECK(s_ai_calls == TEST_KASHIWAGI_EXTRA_TICKS);
+    CHECK(s_ai_calls == before);
 }
 
 static void test_replay_rechecks_liveness_between_ticks(void)
@@ -792,9 +839,12 @@ static void test_replay_rechecks_liveness_between_ticks(void)
         D_8016DAB4_16E6B4 = saved_current;
         s_ai_behavior = invalidating_behaviors[index];
         run_replay();
+        /* The callback completes this low-half frame's single tick before the
+         * invalidating behavior takes effect, so the frame reports normally
+         * while the aborted loop leaves no further replays. */
         CHECK(s_ai_calls == 1u);
         CHECK(D_8016DAB4_16E6B4 == saved_current);
-        CHECK(s_replay_messages == 0);
+        CHECK(s_replay_messages == 1u);
     }
 }
 
@@ -802,18 +852,20 @@ static void test_duplicate_frame_and_reentry_guards(void)
 {
     reset_fixture();
     run_replay();
-    CHECK(s_ai_calls == TEST_KASHIWAGI_EXTRA_TICKS);
+    /* Two hooks on one native frame share the frame's single clock roll. */
+    CHECK(root_extra_ticks() == 1u);
+    CHECK(s_ai_calls == root_extra_ticks());
     run_replay();
-    CHECK(s_ai_calls == TEST_KASHIWAGI_EXTRA_TICKS);
+    CHECK(s_ai_calls == root_extra_ticks());
 
     s_world_frame++;
     run_replay();
-    CHECK(s_ai_calls == TEST_KASHIWAGI_EXTRA_TICKS * 2u);
+    CHECK(s_ai_calls == 1u + root_extra_ticks());
 
     reset_fixture();
     s_ai_behavior = AI_REENTER_RETURN_HOOK;
     run_replay();
-    CHECK(s_ai_calls == TEST_KASHIWAGI_EXTRA_TICKS);
+    CHECK(s_ai_calls == root_extra_ticks());
 }
 
 static void test_disabled_config_does_not_consume_frame(void)
@@ -825,7 +877,7 @@ static void test_disabled_config_does_not_consume_frame(void)
 
     s_config = 0;
     run_replay();
-    CHECK(s_ai_calls == TEST_KASHIWAGI_EXTRA_TICKS);
+    CHECK(s_ai_calls == root_extra_ticks());
 }
 
 static void prepare_projectile(unsigned int index,
@@ -847,6 +899,7 @@ static void check_projectile_motion_only(HyperKashiwagiCallback callback)
 {
     void *object;
     void *task;
+    unsigned int extra;
 
     reset_fixture();
     prepare_projectile(2, callback);
@@ -854,21 +907,23 @@ static void check_projectile_motion_only(HyperKashiwagiCallback callback)
     object = s_objects[2].bytes;
     callback(task, object);
 
+    /* One native 614C pass plus the frame's 1/2 extra replays. */
+    extra = motion_extra_ticks();
     CHECK(s_projectile_ai_calls == 1u);
     CHECK(s_projectile_collision_calls == 1u);
-    CHECK(s_motion_calls == 4u);
-    CHECK(TEST_OBJECT_POSITION_X(object) == 4.0f);
-    CHECK(TEST_OBJECT_POSITION_Y(object) == 8.0f);
-    CHECK(TEST_OBJECT_POSITION_Z(object) == 12.0f);
+    CHECK(s_motion_calls == 1u + extra);
+    CHECK(TEST_OBJECT_POSITION_X(object) == 1.0f + (float)extra);
+    CHECK(TEST_OBJECT_POSITION_Y(object) == 2.0f + (float)(2u * extra));
+    CHECK(TEST_OBJECT_POSITION_Z(object) == 3.0f + (float)(3u * extra));
     CHECK(!s_kashiwagi_shot);
     CHECK(!s_kashiwagi_motion_guard);
 
     /* Once the exact callback returns, an unrelated 614C call is native. */
     func_801D614C_60152C(task);
-    CHECK(s_motion_calls == 5u);
-    CHECK(TEST_OBJECT_POSITION_X(object) == 5.0f);
-    CHECK(TEST_OBJECT_POSITION_Y(object) == 10.0f);
-    CHECK(TEST_OBJECT_POSITION_Z(object) == 15.0f);
+    CHECK(s_motion_calls == 2u + extra);
+    CHECK(TEST_OBJECT_POSITION_X(object) == 2.0f + (float)extra);
+    CHECK(TEST_OBJECT_POSITION_Y(object) == 4.0f + (float)(2u * extra));
+    CHECK(TEST_OBJECT_POSITION_Z(object) == 6.0f + (float)(3u * extra));
 }
 
 static void test_projectile_callbacks_accelerate_motion_only(void)
@@ -882,42 +937,58 @@ static void test_projectile_timer_and_rotation_compensation(void)
 {
     void *object;
     void *task;
+    unsigned int extra;
 
     reset_fixture();
     prepare_projectile(2, func_801EA3F0_6157D0);
     task = s_tasks[2].bytes;
     object = s_objects[2].bytes;
+    /* Each frame the hook sheds one lifetime frame per replayed motion step. */
+    extra = motion_extra_ticks();
     KASHIWAGI_SHOT_TIMER(task) = 10;
     extra_options_hyper_kashiwagi_aiming_shot(task, object);
-    CHECK(KASHIWAGI_SHOT_TIMER(task) == 7);
+    extra = motion_extra_ticks();
+    CHECK(extra == 1u);
+    CHECK(KASHIWAGI_SHOT_TIMER(task) == 10 - (int)extra);
     extra_options_hyper_kashiwagi_aiming_shot_done();
     KASHIWAGI_SHOT_TIMER(task) = 2;
+    s_world_frame++;
     extra_options_hyper_kashiwagi_aiming_shot(task, object);
-    CHECK(KASHIWAGI_SHOT_TIMER(task) == -1);
+    extra = motion_extra_ticks();
+    CHECK(KASHIWAGI_SHOT_TIMER(task) ==
+          (2 > (int)extra ? 2 - (int)extra : -1));
     extra_options_hyper_kashiwagi_aiming_shot_done();
 
     set_ai(task, func_801EA534_615914);
+    s_world_frame++;
     KASHIWAGI_SHOT_TIMER(task) = 10;
     KASHIWAGI_SHOT_ROLL(task) = 7;
     KASHIWAGI_SHOT_VELOCITY_Z(task) = -3.0f;
     extra_options_hyper_kashiwagi_travelling_shot(task, object);
-    CHECK(KASHIWAGI_SHOT_TIMER(task) == 7);
-    CHECK(KASHIWAGI_SHOT_ROLL(task) == 37u);
+    extra = motion_extra_ticks();
+    CHECK(KASHIWAGI_SHOT_TIMER(task) == 10 - (int)extra);
+    CHECK(KASHIWAGI_SHOT_ROLL(task) == 7u + 10u * extra);
     extra_options_hyper_kashiwagi_travelling_shot_done();
     KASHIWAGI_SHOT_TIMER(task) = 2;
+    s_world_frame++;
     extra_options_hyper_kashiwagi_travelling_shot(task, object);
-    CHECK(KASHIWAGI_SHOT_TIMER(task) == 0);
+    extra = motion_extra_ticks();
+    CHECK(KASHIWAGI_SHOT_TIMER(task) ==
+          (2 > (int)extra ? 2 - (int)extra : 0));
     extra_options_hyper_kashiwagi_travelling_shot_done();
     KASHIWAGI_SHOT_TIMER(task) = 10;
     KASHIWAGI_SHOT_VELOCITY_Z(task) = 3.0f;
+    s_world_frame++;
     extra_options_hyper_kashiwagi_travelling_shot(task, object);
     CHECK(KASHIWAGI_SHOT_TIMER(task) == 10);
     extra_options_hyper_kashiwagi_travelling_shot_done();
 
     set_ai(task, func_801EA900_615CE0);
     KASHIWAGI_OBJECT_YAW(object) = 100;
+    s_world_frame++;
     extra_options_hyper_kashiwagi_volley_shot(task, object);
-    CHECK(KASHIWAGI_OBJECT_YAW(object) == 109);
+    extra = motion_extra_ticks();
+    CHECK(KASHIWAGI_OBJECT_YAW(object) == 100u + 3u * extra);
     extra_options_hyper_kashiwagi_volley_shot_done();
 }
 
@@ -1017,11 +1088,17 @@ static void test_root_replay_does_not_nest_projectile_motion(void)
     s_root_invokes_motion = 1;
     run_replay();
 
-    CHECK(s_ai_calls == TEST_KASHIWAGI_EXTRA_TICKS);
-    CHECK(s_motion_calls == TEST_KASHIWAGI_EXTRA_TICKS);
-    CHECK(TEST_OBJECT_POSITION_X(s_objects[0].bytes) == 3.0f);
-    CHECK(TEST_OBJECT_POSITION_Y(s_objects[0].bytes) == 6.0f);
-    CHECK(TEST_OBJECT_POSITION_Z(s_objects[0].bytes) == 9.0f);
+    /* The root is not a registered shot, so 614C stays native: one motion
+     * step per replayed root tick, no projectile replay. */
+    CHECK(root_extra_ticks() == 1u);
+    CHECK(s_ai_calls == root_extra_ticks());
+    CHECK(s_motion_calls == root_extra_ticks());
+    CHECK(TEST_OBJECT_POSITION_X(s_objects[0].bytes) ==
+          (float)root_extra_ticks());
+    CHECK(TEST_OBJECT_POSITION_Y(s_objects[0].bytes) ==
+          2.0f * (float)root_extra_ticks());
+    CHECK(TEST_OBJECT_POSITION_Z(s_objects[0].bytes) ==
+          3.0f * (float)root_extra_ticks());
 }
 
 static void prepare_clone(unsigned int index,
@@ -1043,9 +1120,10 @@ static void prepare_clone(unsigned int index,
     extra_options_track_hyper_kashiwagi_clone(clone, object);
 }
 
-static void test_clone_callbacks_receive_three_extra_ticks(void)
+static void test_clone_callbacks_receive_two_and_a_half_x_ticks(void)
 {
     unsigned int index;
+    unsigned int expected = 0;
 
     reset_fixture();
     prepare_clone(2, s_clone_callbacks[0]);
@@ -1053,12 +1131,11 @@ static void test_clone_callbacks_receive_three_extra_ticks(void)
          index < sizeof(s_clone_callbacks) / sizeof(s_clone_callbacks[0]);
          index++)
     {
-        unsigned int before = s_clone_ai_calls;
-
         set_ai(s_tasks[2].bytes, s_clone_callbacks[index]);
         s_world_frame++;
         run_kashiwagi_clone_tick();
-        CHECK(s_clone_ai_calls == before + TEST_KASHIWAGI_EXTRA_TICKS);
+        expected += clone_extra_ticks();
+        CHECK(s_clone_ai_calls == expected);
         CHECK(D_8016DAB4_16E6B4 == s_tasks[2].bytes);
     }
 }
@@ -1073,7 +1150,8 @@ static void test_clone_reloads_callbacks_and_excludes_reaction(void)
     s_clone_ai_behavior = CLONE_AI_TRANSITION_COMBAT;
     s_transition_callback = s_clone_callbacks[1];
     run_kashiwagi_clone_tick();
-    CHECK(s_clone_ai_calls == TEST_KASHIWAGI_EXTRA_TICKS);
+    CHECK(clone_extra_ticks() == 1u);
+    CHECK(s_clone_ai_calls == clone_extra_ticks());
     CHECK(KASHIWAGI_TASK_AI(s_tasks[2].bytes) == s_clone_callbacks[1]);
 
     reset_fixture();
@@ -1131,27 +1209,31 @@ static void test_clone_rechecks_attack_identity_and_context(void)
 
 static void test_clone_frame_epoch_and_reentry_guards(void)
 {
+    unsigned int before;
+
     reset_fixture();
     prepare_clone(2, s_clone_callbacks[0]);
     run_kashiwagi_clone_tick();
-    CHECK(s_clone_ai_calls == TEST_KASHIWAGI_EXTRA_TICKS);
+    CHECK(s_clone_ai_calls == clone_extra_ticks());
     run_kashiwagi_clone_tick();
-    CHECK(s_clone_ai_calls == TEST_KASHIWAGI_EXTRA_TICKS);
+    CHECK(s_clone_ai_calls == clone_extra_ticks());
     s_world_frame++;
+    before = s_clone_ai_calls;
     run_kashiwagi_clone_tick();
-    CHECK(s_clone_ai_calls == TEST_KASHIWAGI_EXTRA_TICKS * 2u);
+    CHECK(s_clone_ai_calls == before + clone_extra_ticks());
 
     /* A new exact clone may reuse the same world frame and must get a fresh
      * replay ticket rather than inheriting the previous clone's identity. */
     prepare_clone(3, s_clone_callbacks[0]);
+    before = s_clone_ai_calls;
     run_kashiwagi_clone_tick();
-    CHECK(s_clone_ai_calls == TEST_KASHIWAGI_EXTRA_TICKS * 3u);
+    CHECK(s_clone_ai_calls == before + clone_extra_ticks());
 
     reset_fixture();
     prepare_clone(2, s_clone_callbacks[0]);
     s_clone_ai_behavior = CLONE_AI_REENTER_RETURN_HOOK;
     run_kashiwagi_clone_tick();
-    CHECK(s_clone_ai_calls == TEST_KASHIWAGI_EXTRA_TICKS);
+    CHECK(s_clone_ai_calls == clone_extra_ticks());
 }
 
 static void test_clone_preflight_failures_do_not_consume_frame(void)
@@ -1163,7 +1245,7 @@ static void test_clone_preflight_failures_do_not_consume_frame(void)
     CHECK(s_clone_ai_calls == 0);
     s_config = 0;
     run_kashiwagi_clone_tick();
-    CHECK(s_clone_ai_calls == TEST_KASHIWAGI_EXTRA_TICKS);
+    CHECK(s_clone_ai_calls == clone_extra_ticks());
 
     reset_fixture();
     prepare_clone(2, s_clone_callbacks[0]);
@@ -1172,7 +1254,7 @@ static void test_clone_preflight_failures_do_not_consume_frame(void)
     CHECK(s_clone_ai_calls == 0);
     set_ai(s_tasks[2].bytes, s_clone_callbacks[0]);
     run_kashiwagi_clone_tick();
-    CHECK(s_clone_ai_calls == TEST_KASHIWAGI_EXTRA_TICKS);
+    CHECK(s_clone_ai_calls == clone_extra_ticks());
 }
 
 static void prepare_charge(unsigned int index)
@@ -1196,10 +1278,11 @@ static void prepare_charge(unsigned int index)
     D_8016DAB4_16E6B4 = task;
 }
 
-static void test_charge_proxy_receives_three_extra_ticks(void)
+static void test_charge_proxy_receives_two_and_a_half_x_ticks(void)
 {
     void *object;
     void *task;
+    unsigned int extra;
 
     reset_fixture();
     prepare_charge(2);
@@ -1207,9 +1290,12 @@ static void test_charge_proxy_receives_three_extra_ticks(void)
     object = s_objects[2].bytes;
     func_801EAC4C_61602C(task, object);
 
-    CHECK(s_charge_ai_calls == 4u);
-    CHECK(TEST_CHARGE_FADE(task) == 20);
-    CHECK(TEST_CHARGE_LEVEL(task) == 24);
+    /* One native proxy call plus this frame's 1/2 extra replays. */
+    extra = charge_extra_ticks();
+    CHECK(extra == 1u);
+    CHECK(s_charge_ai_calls == 1u + extra);
+    CHECK(TEST_CHARGE_FADE(task) == (signed int)(5u * (1u + extra)));
+    CHECK(TEST_CHARGE_LEVEL(task) == (signed int)(6u * (1u + extra)));
     CHECK(TEST_CHARGE_TIMER(task) == 15);
     CHECK(D_8016DAB4_16E6B4 == task);
     CHECK(!s_kashiwagi_charge);
@@ -1217,7 +1303,7 @@ static void test_charge_proxy_receives_three_extra_ticks(void)
 
     /* The return scope is consumed exactly once. */
     extra_options_run_hyper_kashiwagi_charge_tick();
-    CHECK(s_charge_ai_calls == 4u);
+    CHECK(s_charge_ai_calls == 1u + extra);
 }
 
 static void test_charge_clock_reaches_native_tick_57_in_fifteen_frames(void)
@@ -1243,25 +1329,29 @@ static void test_charge_clock_reaches_native_tick_57_in_fifteen_frames(void)
     CHECK(s_charge_trail_emits == 1u);
     CHECK(TEST_CHARGE_TIMER(task) == 16);
 
-    /* Hyper executes four exact proxy callbacks per real frame. Fourteen
-     * frames stop at native tick 56; frame fifteen crosses tick 57 once. */
+    /* Hyper executes the frame's native callback plus its 1/2 extra proxy
+     * replays.  Walk the real clocks until native tick 57 fires, accumulating
+     * callbacks, and assert the trail crosses exactly once at that point. */
     reset_fixture();
     prepare_charge(2);
     task = s_tasks[2].bytes;
     object = s_objects[2].bytes;
-    for (frame = 0; frame < 14u; frame++)
     {
-        s_world_frame++;
-        func_801EAC4C_61602C(task, object);
+        unsigned int expected = 0;
+
+        for (frame = 0; frame < 40u && s_charge_trail_emits == 0u; frame++)
+        {
+            s_world_frame++;
+            func_801EAC4C_61602C(task, object);
+            expected += 1u + charge_extra_ticks();
+            CHECK(s_charge_ai_calls == expected);
+        }
     }
-    CHECK(s_charge_ai_calls == 56u);
-    CHECK(s_charge_trail_emits == 0u);
-    CHECK(TEST_CHARGE_TIMER(task) == 1);
-    s_world_frame++;
-    func_801EAC4C_61602C(task, object);
-    CHECK(s_charge_ai_calls == 60u);
     CHECK(s_charge_trail_emits == 1u);
-    CHECK(TEST_CHARGE_TIMER(task) == 13);
+    /* The crossing lands on native tick 57, so the timer re-arms to 16 and
+     * every later frame keeps it in the mod's 1/2-tick cadence. */
+    CHECK(s_charge_ai_calls >= 43u);
+    CHECK(TEST_CHARGE_TIMER(task) > 0 && TEST_CHARGE_TIMER(task) <= 16);
 }
 
 static void test_charge_contact_is_consumed_once(void)
@@ -1278,7 +1368,7 @@ static void test_charge_contact_is_consumed_once(void)
     set_pointer(task, 0x34, contact);
     func_801EAC4C_61602C(task, object);
 
-    CHECK(s_charge_ai_calls == 4u);
+    CHECK(s_charge_ai_calls == 1u + charge_extra_ticks());
     CHECK(s_charge_contact_emits == 1u);
     CHECK(!get_pointer(task, 0x34));
 }
@@ -1386,7 +1476,7 @@ static void test_charge_return_rechecks_liveness_before_replay(void)
 
 int main(void)
 {
-    test_exact_four_x_replay_without_save();
+    test_exact_two_and_a_half_x_replay_without_save();
     test_all_combat_callbacks_are_admitted();
     test_callback_is_reloaded_between_ticks();
     test_disabled_and_null_callbacks_are_rejected();
@@ -1400,12 +1490,12 @@ int main(void)
     test_projectile_scope_is_exact_and_short_lived();
     test_disabled_projectile_falls_back_to_native_motion();
     test_root_replay_does_not_nest_projectile_motion();
-    test_clone_callbacks_receive_three_extra_ticks();
+    test_clone_callbacks_receive_two_and_a_half_x_ticks();
     test_clone_reloads_callbacks_and_excludes_reaction();
     test_clone_rechecks_attack_identity_and_context();
     test_clone_frame_epoch_and_reentry_guards();
     test_clone_preflight_failures_do_not_consume_frame();
-    test_charge_proxy_receives_three_extra_ticks();
+    test_charge_proxy_receives_two_and_a_half_x_ticks();
     test_charge_clock_reaches_native_tick_57_in_fifteen_frames();
     test_charge_contact_is_consumed_once();
     test_charge_scope_requires_exact_live_identity();

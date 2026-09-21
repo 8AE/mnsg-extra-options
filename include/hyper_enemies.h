@@ -55,4 +55,22 @@ int extra_options_hyper_tsurami_take_projectile_extra_ticks(
  * callbacks are validated in the dedicated implementation. */
 int extra_options_hyper_koryuta_enemy_is_live(void *task);
 
+/* Impact bosses (Kashiwagi, Taisamba 2, Balberra, D'Etoile) run their
+ * dedicated replay loops at 2.5x, matching the alternating 1/2-tick cadence
+ * used by Dharumanyo and Tsurami.  Each independently owned clock alternates
+ * between one and two extra ticks so the average is 1.5 (2.5x native).
+ *
+ * Call extra_options_hyper_impact_cadence_begin once inside the boss's own
+ * outer armed section, before its loop, then query the frame budget once and
+ * drive the loop with it.  Nested/auxiliary clocks (projectile motion,
+ * summoned clones, aura timers) each take their own clock so they advance by
+ * the same amount as the root they belong to.
+ *
+ * The clock state and the two functions live in src/hyper_impact_cadence.c so
+ * the host regressions can compile that exact source instead of a stub. */
+#define EXTRA_OPTIONS_HYPER_IMPACT_CLOCKS 16u
+void extra_options_hyper_impact_cadence_begin(
+    unsigned int clock_id, unsigned int frame);
+unsigned int extra_options_hyper_impact_extra_ticks(unsigned int clock_id);
+
 #endif

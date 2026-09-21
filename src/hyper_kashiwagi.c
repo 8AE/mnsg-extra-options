@@ -1,6 +1,7 @@
 #include "modding.h"
 #include "recompconfig.h"
 #include "recomputils.h"
+#include "hyper_enemies.h"
 
 /* Kashiwagi is encounter 1 in the file_13 Impact overlay, not a room actor.
  * His own AI advances positions, attack counters, and object +0x28 animation
@@ -14,6 +15,13 @@
  * independent damage dispatcher 801EEF40. Full ROM-qualified symbols below
  * are essential: other overlays reuse these runtime addresses.
  */
+
+/* Independent 2.5x cadence clocks (average 1.5 extra ticks) for the root,
+ * travelling-shot motion, the summoned moving clone, and the charge proxy. */
+#define KASHIWAGI_CLOCK_ROOT 0u
+#define KASHIWAGI_CLOCK_SHOT_MOTION 1u
+#define KASHIWAGI_CLOCK_CLONE 2u
+#define KASHIWAGI_CLOCK_CHARGE 3u
 
 typedef void (*HyperKashiwagiCallback)(void *task, void *object);
 
@@ -178,10 +186,12 @@ void extra_options_track_hyper_kashiwagi(void *task)
     s_kashiwagi_reported = 0;
 }
 
-/* Consume incoming damage once, then perform three extra boss-only updates.
- * Reload the callback each time: attacks may switch states on any substep.
- * Native animation completion and attack counters therefore stay together,
- * including equality-triggered shots that a scaled timer could skip. */
+/* Consume incoming damage once, then perform the frame's extra boss-only
+ * updates.  The alternating 1/2-tick budget averages 1.5 extra ticks (2.5x),
+ * matching Dharumanyo and Tsurami.  Reload the callback each time: attacks
+ * may switch states on any substep.  Native animation completion and attack
+ * counters therefore stay together, including equality-triggered shots that
+ * a scaled timer could skip. */
 RECOMP_HOOK_RETURN("func_801EEF40_61A320")
 void extra_options_run_hyper_kashiwagi_tick(void)
 {
@@ -190,6 +200,7 @@ void extra_options_run_hyper_kashiwagi_tick(void)
     unsigned int epoch;
     unsigned int tick;
     unsigned int completed = 0;
+    unsigned int extra_ticks;
     unsigned short frame;
 
     if (s_kashiwagi_replay_guard || recomp_get_config_u32("hyper_enemies") != 0 ||
@@ -202,11 +213,13 @@ void extra_options_run_hyper_kashiwagi_tick(void)
         return;
     s_kashiwagi_frame = frame;
     s_kashiwagi_frame_valid = 1;
+    extra_options_hyper_impact_cadence_begin(KASHIWAGI_CLOCK_ROOT, frame);
+    extra_ticks = extra_options_hyper_impact_extra_ticks(KASHIWAGI_CLOCK_ROOT);
     epoch = s_kashiwagi_epoch;
     task = s_kashiwagi_task;
     saved_current_task = D_8016DAB4_16E6B4;
     s_kashiwagi_replay_guard = 1;
-    for (tick = 0; tick < 3; tick++)
+    for (tick = 0; tick < extra_ticks; tick++)
     {
         HyperKashiwagiCallback callback;
         int context_changed;
@@ -227,18 +240,19 @@ void extra_options_run_hyper_kashiwagi_tick(void)
     }
     D_8016DAB4_16E6B4 = saved_current_task;
     s_kashiwagi_replay_guard = 0;
-    if (completed == 3 && !s_kashiwagi_reported)
+    if (completed == extra_ticks && !s_kashiwagi_reported)
     {
-        recomp_printf("[Extra Options] Kashiwagi Hyper: 4x movement, animation, and attacks active.\n");
+        recomp_printf("[Extra Options] Kashiwagi Hyper: 2.5x movement, animation, and attacks active.\n");
         s_kashiwagi_reported = 1;
     }
 }
 
 /* These two travelling shot families are Kashiwagi-only. Their AI also
  * handles collisions, so never replay the entire projectile callback. Scope
- * three extra calls to the native movement-only helper instead. Constructors,
- * impact effects, attached proxies, and two-frame melee hitboxes are not
- * admitted to this movement path. The charge proxy has its own clock below. */
+ * the frame's extra calls to the native movement-only helper instead.
+ * Constructors, impact effects, attached proxies, and two-frame melee
+ * hitboxes are not admitted to this movement path. The charge proxy has its
+ * own clock below. */
 extern void func_801D614C_60152C(void *task);
 extern void func_801EA3F0_6157D0(void *task, void *object);
 extern void func_801EA534_615914(void *task, void *object);
@@ -278,11 +292,23 @@ void extra_options_hyper_kashiwagi_aiming_shot(void *task, void *object)
 {
     if (begin_kashiwagi_shot(task, object, func_801EA3F0_6157D0))
     {
-        /* Native uses old_timer < 0, then installs the travelling callback.
+        /* The shot advances one motion step per extra movement tick, so the
+         * lifetime timer must lose the same number of frames the movement
+         * helper replays.  Roll this frame's 2.5x budget here (the motion
+         * helper shares the same clock) and pre-subtract it, because native
+         * uses old_timer < 0 and then installs the travelling callback.
          * Clamp at -1 so shortening the delay cannot skip that transition. */
+        unsigned int extra_ticks;
         signed int timer = KASHIWAGI_SHOT_TIMER(task);
+        extra_options_hyper_impact_cadence_begin(
+            KASHIWAGI_CLOCK_SHOT_MOTION, KASHIWAGI_WORLD_FRAME);
+        extra_ticks = extra_options_hyper_impact_extra_ticks(
+            KASHIWAGI_CLOCK_SHOT_MOTION);
         if (timer >= 0)
-            KASHIWAGI_SHOT_TIMER(task) = timer > 2 ? timer - 3 : -1;
+            KASHIWAGI_SHOT_TIMER(task) =
+                timer > (signed int)extra_ticks
+                    ? timer - (signed int)extra_ticks
+                    : -1;
     }
 }
 
@@ -291,12 +317,22 @@ void extra_options_hyper_kashiwagi_travelling_shot(void *task, void *object)
 {
     if (begin_kashiwagi_shot(task, object, func_801EA534_615914))
     {
+        unsigned int extra_ticks;
         signed int timer = KASHIWAGI_SHOT_TIMER(task);
-        KASHIWAGI_SHOT_ROLL(task) += 30u; /* Native adds the remaining 10. */
+        extra_options_hyper_impact_cadence_begin(
+            KASHIWAGI_CLOCK_SHOT_MOTION, KASHIWAGI_WORLD_FRAME);
+        extra_ticks = extra_options_hyper_impact_extra_ticks(
+            KASHIWAGI_CLOCK_SHOT_MOTION);
+        /* Native adds the remaining 10 per motion step.  Pre-add the extra
+         * steps' share so the visible roll matches the frame's step count. */
+        KASHIWAGI_SHOT_ROLL(task) += 10u * extra_ticks;
         /* The native expiry counter is used only by backward-flying shots.
          * Keep their lifetime in step with motion without repeating deletion. */
         if (KASHIWAGI_SHOT_VELOCITY_Z(task) < 0.0f && timer > 0)
-            KASHIWAGI_SHOT_TIMER(task) = timer > 3 ? timer - 3 : 0;
+            KASHIWAGI_SHOT_TIMER(task) =
+                timer > (signed int)extra_ticks
+                    ? timer - (signed int)extra_ticks
+                    : 0;
     }
 }
 
@@ -304,7 +340,16 @@ RECOMP_HOOK("func_801EA900_615CE0")
 void extra_options_hyper_kashiwagi_volley_shot(void *task, void *object)
 {
     if (begin_kashiwagi_shot(task, object, func_801EA900_615CE0))
-        KASHIWAGI_OBJECT_YAW(object) += 9u; /* Native adds the remaining 3. */
+    {
+        unsigned int extra_ticks;
+        extra_options_hyper_impact_cadence_begin(
+            KASHIWAGI_CLOCK_SHOT_MOTION, KASHIWAGI_WORLD_FRAME);
+        extra_ticks = extra_options_hyper_impact_extra_ticks(
+            KASHIWAGI_CLOCK_SHOT_MOTION);
+        /* Native adds the remaining 3 per motion step. */
+        KASHIWAGI_OBJECT_YAW(object) =
+            (unsigned short)(KASHIWAGI_OBJECT_YAW(object) + 3u * extra_ticks);
+    }
 }
 
 RECOMP_HOOK_RETURN("func_801EA3F0_6157D0")
@@ -340,7 +385,12 @@ void extra_options_hyper_kashiwagi_shot_motion(void *task)
     /* 614C only adds velocity to XYZ in the linked model list. No callbacks,
      * task allocation/deletion, collision, timers, or damage are inside it. */
     s_kashiwagi_motion_guard = 1;
-    for (tick = 0; tick < 3; tick++)
+    extra_options_hyper_impact_cadence_begin(
+        KASHIWAGI_CLOCK_SHOT_MOTION, KASHIWAGI_WORLD_FRAME);
+    for (tick = 0;
+         tick < extra_options_hyper_impact_extra_ticks(
+                    KASHIWAGI_CLOCK_SHOT_MOTION);
+         tick++)
         func_801D614C_60152C(task);
     s_kashiwagi_motion_guard = 0;
 }
@@ -433,11 +483,14 @@ static void run_kashiwagi_clone_tick(void)
         return;
     s_kashiwagi_clone_frame = frame;
     s_kashiwagi_clone_frame_valid = 1;
+    extra_options_hyper_impact_cadence_begin(KASHIWAGI_CLOCK_CLONE, frame);
     task = s_kashiwagi_clone;
     epoch = s_kashiwagi_epoch;
     saved_current_task = D_8016DAB4_16E6B4;
     s_kashiwagi_clone_guard = 1;
-    for (tick = 0; tick < 3; tick++)
+    for (tick = 0;
+         tick < extra_options_hyper_impact_extra_ticks(KASHIWAGI_CLOCK_CLONE);
+         tick++)
     {
         HyperKashiwagiCallback callback;
         int context_changed;
@@ -526,7 +579,12 @@ void extra_options_run_hyper_kashiwagi_charge_tick(void)
     if (saved_current_task != task)
         return;
     s_kashiwagi_charge_guard = 1;
-    for (tick = 0; tick < 3; tick++)
+    extra_options_hyper_impact_cadence_begin(
+        KASHIWAGI_CLOCK_CHARGE, KASHIWAGI_WORLD_FRAME);
+    for (tick = 0;
+         tick < extra_options_hyper_impact_extra_ticks(
+                    KASHIWAGI_CLOCK_CHARGE);
+         tick++)
     {
         if (epoch != s_kashiwagi_epoch || !kashiwagi_is_live() ||
             KASHIWAGI_ATTACK_KIND(s_kashiwagi_task) != 2 ||

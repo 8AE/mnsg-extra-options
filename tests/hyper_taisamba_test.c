@@ -31,7 +31,26 @@ int recomp_printf(const char *format, ...);
 #define TAISAMBA_ENCOUNTER s_host_encounter
 #define TAISAMBA_WORLD_FRAME s_host_frame
 #define TAISAMBA_CALLBACK_ENABLED(callback) ((callback) && (callback) != disabled)
+#include "../src/hyper_impact_cadence.c"
 #include "../src/hyper_taisamba.c"
+
+/* Production keeps each Impact clock's phase for the whole session; the
+ * fixtures share one process, so reset the clocks per case.  Each frame then
+ * runs its native callback plus the frame's 1/2 extra replays (2.5x). */
+static void reset_impact_clocks(void)
+{
+    memset(s_impact_clocks, 0, sizeof(s_impact_clocks));
+}
+
+static unsigned int root_extra_ticks(void)
+{
+    return extra_options_hyper_impact_extra_ticks(TAISAMBA_CLOCK_ROOT);
+}
+
+static unsigned int child_extra_ticks(void)
+{
+    return extra_options_hyper_impact_extra_ticks(TAISAMBA_CLOCK_CHILD);
+}
 
 #define CHECK(x) do { if (!(x)) { \
     fprintf(stderr, "%s:%d: %s\n", __FILE__, __LINE__, #x); exit(1); \
@@ -150,6 +169,7 @@ TAISAMBA_CHILD_CALLBACKS(CHILD_STUB)
 
 static void fixture(void)
 {
+    reset_impact_clocks();
     memset(s_tasks, 0, sizeof(s_tasks));
     memset(s_objects, 0, sizeof(s_objects));
     memset(s_states, 0, sizeof(s_states));
@@ -186,12 +206,18 @@ static void run_root_frame(void)
     extra_options_run_hyper_taisamba_tick();
 }
 
-static void check_four_ticks(void)
+/* A Hyper frame runs the native callback once plus the frame's 1/2 extra
+ * replays (2.5x).  Every tick advances both tracked floats by 1.0, so the
+ * expected call count fully determines the pose. */
+static void check_frame_ticks(unsigned int expected_calls)
 {
-    CHECK(s_calls == 4);
-    CHECK(*(float *)((char *)s_expected_object + 8) == 4.0f);
-    CHECK(*(float *)((char *)s_expected_object + 0x28) == 4.0f);
-    CHECK(s_emissions == 1);
+    CHECK(s_calls == expected_calls);
+    CHECK(*(float *)((char *)s_expected_object + 8) ==
+          (float)expected_calls);
+    CHECK(*(float *)((char *)s_expected_object + 0x28) ==
+          (float)expected_calls);
+    /* F76D0 emits on every fourth tick; one Hyper frame stays below four. */
+    CHECK(s_emissions == expected_calls / 4u);
     CHECK(TAISAMBA_HP(s_states[0].bytes) == 2000);
     CHECK(TAISAMBA_PLAYER_HP(s_states[0].bytes) == 500);
 }
@@ -200,7 +226,7 @@ static void test_all_callbacks(void)
 {
 #define TEST_ROOT(name) \
     fixture(); set_ai(s_tasks[0].bytes, name); run_root_frame(); \
-    check_four_ticks(); CHECK(s_messages == 1); \
+    check_frame_ticks(1u + root_extra_ticks()); CHECK(s_messages == 1); \
     CHECK(D_8016DAB4_16E6B4 == s_tasks[3].bytes);
     TAISAMBA_ROOT_CALLBACKS(TEST_ROOT)
 #undef TEST_ROOT
@@ -208,7 +234,8 @@ static void test_all_callbacks(void)
     fixture(); s_expected_task = s_tasks[1].bytes; \
     s_expected_object = s_objects[1].bytes; set_ai(s_tasks[1].bytes, name); \
     D_8016DAB4_16E6B4 = s_tasks[1].bytes; name(s_tasks[1].bytes, s_objects[1].bytes); \
-    check_four_ticks(); CHECK(D_8016DAB4_16E6B4 == s_tasks[1].bytes);
+    check_frame_ticks(1u + child_extra_ticks()); \
+    CHECK(D_8016DAB4_16E6B4 == s_tasks[1].bytes);
     TAISAMBA_CHILD_CALLBACKS(TEST_CHILD)
 #undef TEST_CHILD
 }
@@ -219,15 +246,22 @@ static void test_root_lifecycle(void)
     fixture();
     run_root_frame();
     extra_options_run_hyper_taisamba_tick();
-    CHECK(s_calls == 4);
-    CHECK(s_seen_clocks[0] == 100 && s_seen_clocks[1] == 101 &&
-          s_seen_clocks[2] == 102 && s_seen_clocks[3] == 103);
+    /* One native call plus the frame's 1/2 replays; replays see the next
+     * battle-clock ticks after the native call's base (100 -> 101 -> ...). */
+    CHECK(s_calls == 1u + root_extra_ticks());
+    CHECK(s_seen_clocks[0] == 100 && s_seen_clocks[1] == 101);
     CHECK(TAISAMBA_CLOCK(s_states[0].bytes) == 100);
-    s_host_frame++;
-    run_root_frame();
-    CHECK(s_calls == 8 && s_messages == 1);
-    fixture(); s_behavior = TRANSITION; run_root_frame(); check_four_ticks();
-    fixture(); s_behavior = REENTER; run_root_frame(); check_four_ticks();
+    {
+        unsigned int first_frame = 1u + root_extra_ticks();
+        s_host_frame++;
+        run_root_frame();
+        CHECK(s_calls == first_frame + 1u + root_extra_ticks());
+    }
+    CHECK(s_messages == 1);
+    fixture(); s_behavior = TRANSITION; run_root_frame();
+    check_frame_ticks(1u + root_extra_ticks());
+    fixture(); s_behavior = REENTER; run_root_frame();
+    check_frame_ticks(1u + root_extra_ticks());
     for (behavior = EXCLUDED; behavior <= CHANGE_ENCOUNTER; behavior++)
     {
         fixture(); s_behavior = behavior; run_root_frame();
@@ -247,39 +281,57 @@ static void test_root_lifecycle(void)
     fixture(); s_host_model = 0;
     extra_options_run_hyper_taisamba_tick(); CHECK(s_calls == 0);
     fixture(); s_host_frame = 0xFFFF; run_root_frame();
-    s_host_frame = 0; run_root_frame(); CHECK(s_calls == 8);
+    {
+        unsigned int first_frame = 1u + root_extra_ticks();
+        s_host_frame = 0; run_root_frame();
+        CHECK(s_calls == first_frame + 1u + root_extra_ticks());
+    }
 }
 
 static void test_ascent_clock(void)
 {
+    /* The ascent hook counts requests per frame, capped at four.  A Hyper
+     * frame therefore reaches min(1 + budget, 4) requests, not a fixed 4. */
     fixture(); set_ai(s_tasks[0].bytes, func_801F1788_61CB68);
-    run_root_frame(); CHECK(TAISAMBA_ARENA_RISE(s_states[0].bytes) == 4.0f);
+    run_root_frame();
+    {
+        unsigned int requests = 1u + root_extra_ticks();
+        CHECK(TAISAMBA_ARENA_RISE(s_states[0].bytes) ==
+              (float)(requests < 4u ? requests : 4u));
+    }
     fixture(); set_ai(s_tasks[0].bytes, func_801F1788_61CB68);
     TAISAMBA_ARENA_HEIGHT(s_states[0].bytes) = 398.0f;
-    run_root_frame(); CHECK(TAISAMBA_ARENA_RISE(s_states[0].bytes) == 2.0f);
+    run_root_frame();
+    CHECK(TAISAMBA_ARENA_RISE(s_states[0].bytes) == 2.0f); /* clamped to remaining */
     fixture(); set_ai(s_tasks[0].bytes, func_801F1788_61CB68);
     TAISAMBA_ARENA_HEIGHT(s_states[0].bytes) = 400.0f;
     run_root_frame(); CHECK(TAISAMBA_ARENA_RISE(s_states[0].bytes) == 0.0f);
     fixture(); set_ai(s_tasks[0].bytes, func_801F1788_61CB68);
     extra_options_run_hyper_taisamba_tick();
-    CHECK(TAISAMBA_ARENA_RISE(s_states[0].bytes) == 3.0f);
+    CHECK(TAISAMBA_ARENA_RISE(s_states[0].bytes) ==
+          (float)root_extra_ticks());
     fixture(); TAISAMBA_ARENA_RISE(s_states[0].bytes) = 2.0f;
     run_root_frame(); CHECK(TAISAMBA_ARENA_RISE(s_states[0].bytes) == 2.0f);
     /* Native sibling ordering runs the damage-return replay BEFORE root.
-     * Its normal fourth call must not overwrite +17C back to one. */
+     * Its replay frame's requests must not overwrite +17C back to one. */
     fixture(); set_ai(s_tasks[0].bytes, func_801F1788_61CB68);
     extra_options_run_hyper_taisamba_tick();
-    CHECK(TAISAMBA_ARENA_RISE(s_states[0].bytes) == 3.0f);
+    CHECK(TAISAMBA_ARENA_RISE(s_states[0].bytes) ==
+          (float)root_extra_ticks());
     D_8016DAB4_16E6B4 = s_tasks[0].bytes;
     func_801F1788_61CB68(s_tasks[0].bytes, s_objects[0].bytes);
-    CHECK(TAISAMBA_ARENA_RISE(s_states[0].bytes) == 4.0f);
-    CHECK(s_calls == 4);
-    CHECK(s_seen_clocks[0] == 101 && s_seen_clocks[1] == 102 &&
-          s_seen_clocks[2] == 103 && s_seen_clocks[3] == 100);
+    {
+        unsigned int requests = 1u + root_extra_ticks();
+        CHECK(TAISAMBA_ARENA_RISE(s_states[0].bytes) ==
+              (float)(requests < 4u ? requests : 4u));
+    }
+    CHECK(s_calls == root_extra_ticks() + 1u);
+    CHECK(s_seen_clocks[0] == 101 && s_seen_clocks[1] == 100);
     s_host_frame++;
     D_8016DAB4_16E6B4 = s_tasks[3].bytes;
     extra_options_run_hyper_taisamba_tick();
-    CHECK(TAISAMBA_ARENA_RISE(s_states[0].bytes) == 3.0f);
+    CHECK(TAISAMBA_ARENA_RISE(s_states[0].bytes) ==
+          (float)root_extra_ticks());
 }
 
 static void run_child_frame(int behavior)
@@ -296,8 +348,10 @@ static void run_child_frame(int behavior)
 static void test_child_lifecycle(void)
 {
     int behavior;
-    run_child_frame(NORMAL); check_four_ticks(); CHECK(s_contacts == 1);
-    run_child_frame(TRANSITION); check_four_ticks(); CHECK(s_contacts == 1);
+    run_child_frame(NORMAL);
+    check_frame_ticks(1u + child_extra_ticks()); CHECK(s_contacts == 1);
+    run_child_frame(TRANSITION);
+    check_frame_ticks(1u + child_extra_ticks()); CHECK(s_contacts == 1);
     run_child_frame(HIT_EFFECT); CHECK(s_calls == 1 && s_contacts == 1);
     CHECK(host_ai(s_tasks[1].bytes) == excluded);
     for (behavior = EXCLUDED; behavior <= CHANGE_ENCOUNTER; behavior++)

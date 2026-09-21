@@ -1,6 +1,14 @@
 #include "modding.h"
 #include "recompconfig.h"
 #include "recomputils.h"
+#include "hyper_enemies.h"
+
+/* Independent 2.5x cadence clocks for the root, deck/pod parts, drones and
+ * the beam charge.  Tasks of one kind advance together on the same native
+ * frame, so they share one alternating 1/2-tick clock. */
+#define BALBERRA_CLOCK_ROOT 6u
+#define BALBERRA_CLOCK_PART 7u
+#define BALBERRA_CLOCK_SHOT 12u
 
 /* Balberra: USA file_13, ROM 5F6840 / VRAM 801CB460, decompressed ROM
  * SHA1 6ea0ed71032ce08fc2745f412d84936382197494. 801FFE80 allocates
@@ -198,15 +206,20 @@ static void balberra_finish(void)
 {
     BalberraClock *slot = s_balberra_current;
     unsigned int tick, epoch = s_balberra_epoch;
+    unsigned int clock_id, extra_ticks;
     unsigned char rocket_cue;
     if (s_balberra_replay || !balberra_clock_live(slot, epoch) ||
         D_8016DAB4_16E6B4 != slot->task) return;
     if (slot->frame_valid && slot->frame == BALBERRA_FRAME) return;
     slot->frame = BALBERRA_FRAME;
     slot->frame_valid = 1;
+    clock_id = slot->kind == BALBERRA_ROOT ? BALBERRA_CLOCK_ROOT
+                                           : BALBERRA_CLOCK_PART;
+    extra_options_hyper_impact_cadence_begin(clock_id, BALBERRA_FRAME);
+    extra_ticks = extra_options_hyper_impact_extra_ticks(clock_id);
     rocket_cue = D_8020EF40_63A320[7];
     s_balberra_replay = 1;
-    for (tick = 0; tick < 3; ++tick) {
+    for (tick = 0; tick < extra_ticks; ++tick) {
         if (!balberra_clock_live(slot, epoch)) break;
         D_8016DAB4_16E6B4 = slot->task;
         BALBERRA_AI(slot->task)(slot->task, slot->object);
@@ -223,8 +236,8 @@ static void balberra_finish(void)
      * Their native single dispatch emits one shot each, not four duplicates. */
     if (slot->kind == BALBERRA_ROOT && balberra_clock_live(slot, epoch)) {
         D_8020EF40_63A320[7] = rocket_cue;
-        if (!s_balberra_reported && tick == 3) {
-            recomp_printf("[Extra Options] Balberra Hyper: 4x movement, components, and attacks active.\n");
+        if (!s_balberra_reported && tick == extra_ticks) {
+            recomp_printf("[Extra Options] Balberra Hyper: 2.5x movement, components, and attacks active.\n");
             s_balberra_reported = 1;
         }
     }
@@ -300,14 +313,30 @@ static void balberra_begin_shot(void *task, void *object, BalberraCallback callb
     s_balberra_shot = task;
     s_balberra_shot_object = object;
     s_balberra_shot_epoch = s_balberra_epoch;
+    /* The shot's lifetime timer advances one frame per motion step, so it must
+     * shed the same number of frames the movement helper replays.  Roll this
+     * frame's 2.5x budget here; the motion helper shares this clock. */
+    extra_options_hyper_impact_cadence_begin(BALBERRA_CLOCK_SHOT, BALBERRA_FRAME);
     if (callback == func_8020396C_62ED4C) {
+        unsigned int extra_ticks =
+            extra_options_hyper_impact_extra_ticks(BALBERRA_CLOCK_SHOT);
         signed int timer = BALBERRA_S32(task, 0x7C);
-        if (timer >= 0) BALBERRA_S32(task, 0x7C) = timer > 2 ? timer - 3 : -1;
+        if (timer >= 0)
+            BALBERRA_S32(task, 0x7C) =
+                timer > (signed int)extra_ticks
+                    ? timer - (signed int)extra_ticks
+                    : -1;
     }
     else if (callback == func_80203A54_62EE34 &&
              *(volatile float *)((char *)task + 0x78) < 0.0f) {
+        unsigned int extra_ticks =
+            extra_options_hyper_impact_extra_ticks(BALBERRA_CLOCK_SHOT);
         signed int timer = BALBERRA_S32(task, 0x7C);
-        if (timer > 0) BALBERRA_S32(task, 0x7C) = timer > 3 ? timer - 3 : 0;
+        if (timer > 0)
+            BALBERRA_S32(task, 0x7C) =
+                timer > (signed int)extra_ticks
+                    ? timer - (signed int)extra_ticks
+                    : 0;
     }
 }
 
@@ -329,6 +358,10 @@ void extra_options_balberra_projectile_motion(void *task)
         D_8016DAB4_16E6B4 != task || BALBERRA_POINTER(task, 0x18) != s_balberra_shot_object ||
         recomp_get_config_u32("hyper_enemies") != 0 || !balberra_live()) return;
     s_balberra_motion_guard = 1;
-    for (i = 0; i < 3; ++i) func_801D614C_60152C(task);
+    extra_options_hyper_impact_cadence_begin(BALBERRA_CLOCK_SHOT, BALBERRA_FRAME);
+    for (i = 0;
+         i < extra_options_hyper_impact_extra_ticks(BALBERRA_CLOCK_SHOT);
+         ++i)
+        func_801D614C_60152C(task);
     s_balberra_motion_guard = 0;
 }

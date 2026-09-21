@@ -1,6 +1,11 @@
 #include "modding.h"
 #include "recompconfig.h"
 #include "recomputils.h"
+#include "hyper_enemies.h"
+
+/* Independent 2.5x cadence clocks for the root and its owned child tasks. */
+#define TAISAMBA_CLOCK_ROOT 4u
+#define TAISAMBA_CLOCK_CHILD 5u
 
 /* Taisamba 2 is encounter 2 in file_13, NOT an ordinary room actor.
  * USA decompressed-ROM SHA1 6ea0ed71032ce08fc2745f412d84936382197494:
@@ -283,13 +288,16 @@ void extra_options_run_hyper_taisamba_tick(void)
         return;
     s_taisamba_frame = frame;
     s_taisamba_frame_valid = 1;
+    extra_options_hyper_impact_cadence_begin(TAISAMBA_CLOCK_ROOT, frame);
     task = s_taisamba_task;
     state = s_taisamba_state;
     epoch = s_taisamba_epoch;
     clock = TAISAMBA_CLOCK(state);
     saved_current = D_8016DAB4_16E6B4;
     s_taisamba_guard = 1;
-    for (tick = 0; tick < 3; tick++)
+    for (tick = 0;
+         tick < extra_options_hyper_impact_extra_ticks(TAISAMBA_CLOCK_ROOT);
+         tick++)
     {
         TaisambaCallback callback;
         int context_changed;
@@ -318,9 +326,10 @@ void extra_options_run_hyper_taisamba_tick(void)
     s_taisamba_guard = 0;
     if (epoch == s_taisamba_epoch && taisamba_live())
     {
-        if (tick == 3 && !s_taisamba_reported)
+        if (tick == extra_options_hyper_impact_extra_ticks(
+                         TAISAMBA_CLOCK_ROOT) && !s_taisamba_reported)
         {
-            recomp_printf("[Extra Options] Taisamba 2 Hyper: 4x movement, animation, attacks, and projectiles active.\n");
+            recomp_printf("[Extra Options] Taisamba 2 Hyper: 2.5x movement, animation, attacks, and projectiles active.\n");
             s_taisamba_reported = 1;
         }
     }
@@ -366,7 +375,11 @@ static void taisamba_run_child(void)
     if (saved_current != task)
         return;
     s_taisamba_child_guard = 1;
-    for (tick = 0; tick < 3; tick++)
+    extra_options_hyper_impact_cadence_begin(
+        TAISAMBA_CLOCK_CHILD, TAISAMBA_WORLD_FRAME);
+    for (tick = 0;
+         tick < extra_options_hyper_impact_extra_ticks(TAISAMBA_CLOCK_CHILD);
+         tick++)
     {
         TaisambaCallback callback;
         if (epoch != s_taisamba_epoch || !taisamba_live() ||
